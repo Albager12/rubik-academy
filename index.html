@@ -2067,6 +2067,84 @@ h1, h2, h3 { line-height: 1.25; }
     return { colors: out, count: scan.matchCount(out, expected) };
   };
 
+  scan.readFaceLive = function (cells, expectedCenter) {
+    var canon = CANON_RGB[expectedCenter];
+    var center = cells[4];
+    var gain = [0, 1, 2].map(function (ch) {
+      return Math.max(0.3, Math.min(3.5, canon[ch] / Math.max(12, center[ch])));
+    });
+    var centroids = scan.canonCentroids();
+    var out = "", minConf = 1;
+    for (var i = 0; i < 9; i++) {
+      var c = [0, 1, 2].map(function (ch) {
+        return Math.max(0, Math.min(255, cells[i][ch] * gain[ch]));
+      });
+      var lab = srgb2lab(c[0], c[1], c[2]);
+      var best = null, second = null;
+      Object.keys(centroids).forEach(function (col) {
+        var d = dist2(lab, centroids[col]);
+        if (!best || d < best.d) { second = best; best = { col: col, d: d }; }
+        else if (!second || d < second.d) second = { col: col, d: d };
+      });
+      var conf = second ? (second.d - best.d) / (second.d + best.d + 1e-6) : 1;
+      if (i !== 4 && conf < minConf) minConf = conf;
+      out += (i === 4) ? expectedCenter : best.col;
+    }
+    var centerOk = scan.roughCenterColor(center) === expectedCenter ||
+      scan.classifyCells([center], centroids).colors === expectedCenter;
+    return { colors: out, conf: minConf, centerOk: centerOk };
+  };
+
+  scan.findCubeRegion = function (grid, w, hh) {
+    function cellMean(x0, y0, side) {
+      var cells = [];
+      var cs = side / 3;
+      for (var r = 0; r < 3; r++) {
+        for (var c = 0; c < 3; c++) {
+          var sum = [0, 0, 0], n = 0;
+          var xa = Math.round(x0 + c * cs + cs * 0.3), xb = Math.round(x0 + c * cs + cs * 0.7);
+          var ya = Math.round(y0 + r * cs + cs * 0.3), yb = Math.round(y0 + r * cs + cs * 0.7);
+          for (var y = ya; y < yb; y++) {
+            for (var x = xa; x < xb; x++) {
+              var o = (y * w + x) * 3;
+              sum[0] += grid[o]; sum[1] += grid[o + 1]; sum[2] += grid[o + 2]; n++;
+            }
+          }
+          cells.push(n ? [sum[0] / n, sum[1] / n, sum[2] / n] : [0, 0, 0]);
+        }
+      }
+      return cells;
+    }
+    var centroids = scan.canonCentroids();
+    var best = null;
+    var minSide = Math.floor(Math.min(w, hh) * 0.28);
+    var maxSide = Math.floor(Math.min(w, hh) * 0.96);
+    for (var side = minSide; side <= maxSide; side = Math.max(side + 4, Math.floor(side * 1.18))) {
+      var step = Math.max(3, Math.floor(side * 0.12));
+      for (var y0 = 0; y0 + side <= hh; y0 += step) {
+        for (var x0 = 0; x0 + side <= w; x0 += step) {
+          var cells = scan.normalizeCells(cellMean(x0, y0, side));
+          var score = 0;
+          var seen = {};
+          for (var i = 0; i < 9; i++) {
+            var lab = srgb2lab(cells[i][0], cells[i][1], cells[i][2]);
+            var bd = 1e9, bc = null;
+            Object.keys(centroids).forEach(function (col) {
+              var d = dist2(lab, centroids[col]);
+              if (d < bd) { bd = d; bc = col; }
+            });
+            score -= Math.sqrt(bd);
+            seen[bc] = 1;
+          }
+          score += Object.keys(seen).length * 11;
+          score += side * 0.15;
+          if (!best || score > best.score) best = { x: x0, y: y0, side: side, score: score };
+        }
+      }
+    }
+    return best;
+  };
+
   scan.quality = function (lumGrid, w, hh) {
     var mean = 0, i;
     for (i = 0; i < lumGrid.length; i++) mean += lumGrid[i];
@@ -2421,6 +2499,8 @@ h1, h2, h3 { line-height: 1.25; }
   d["scan.camera"] = "Use camera";
   d["scan.random"] = "Surprise mix";
   d["scan.reset"] = "All done cube";
+  d["scan.photoMode"] = "Photos instead";
+  d["scan.liveTip"] = "Fill the frame with one side, near a window";
 
   d["ar.title"] = "Magic Camera";
   d["ar.pickTarget"] = "What shall we finish today?";
@@ -2752,6 +2832,8 @@ h1, h2, h3 { line-height: 1.25; }
   d["scan.camera"] = "استخدم الكاميرا";
   d["scan.random"] = "خلطة مفاجأة";
   d["scan.reset"] = "مكعب مرتب";
+  d["scan.photoMode"] = "صور بدلًا";
+  d["scan.liveTip"] = "املأ الإطار بوجه واحد، قرب النافذة";
 
   d["ar.title"] = "الكاميرا السحرية";
   d["ar.pickTarget"] = "ماذا سنُنجز اليوم؟";
@@ -3516,15 +3598,16 @@ h1, h2, h3 { line-height: 1.25; }
 
       var today = RA.today();
       var dailyDone = p.game.daily && p.game.daily.date === today && p.game.daily.done;
-      wrap.appendChild(h("div", { style: { display: "flex", gap: "10px", justifyContent: "center", flexWrap: "wrap" } },
+      wrap.appendChild(h("div", { style: { display: "flex", flexDirection: "column", gap: "10px", alignItems: "center" } },
         h("button", {
-          class: "btn " + (dailyDone ? "btn-ghost" : "btn-gold"),
-          onclick: function () { RA.sfx("tap"); if (!dailyDone) RA.startDaily(); }
-        }, (dailyDone ? "✓ " : "🎯 ") + RA.t(dailyDone ? "map.dailyDone" : "map.daily")),
-        h("button", {
-          class: "btn btn-ghost",
+          class: "btn btn-gold btn-big",
+          style: { width: "min(100%, 380px)" },
           onclick: function () { RA.sfx("tap"); RA.go("ar"); }
-        }, "🎥 " + RA.t("map.freeSolve"))
+        }, "🎥 " + RA.t("ar.title") + " — " + RA.t("map.freeSolve")),
+        h("button", {
+          class: "btn " + (dailyDone ? "btn-ghost" : "btn-ghost"),
+          onclick: function () { RA.sfx("tap"); if (!dailyDone) RA.startDaily(); }
+        }, (dailyDone ? "✓ " : "🎯 ") + RA.t(dailyDone ? "map.dailyDone" : "map.daily"))
       ));
 
       var mapWrap = h("div", { class: "map-wrap" });
@@ -4507,14 +4590,37 @@ h1, h2, h3 { line-height: 1.25; }
     return { canvas: canvas, ctx: ctx2d };
   }
 
+  function rgbGrid(ctx2d, gsize) {
+    var tmp = document.createElement("canvas");
+    tmp.width = gsize; tmp.height = gsize;
+    var tctx = tmp.getContext("2d", { willReadFrequently: true });
+    tctx.drawImage(ctx2d.canvas, 0, 0, gsize, gsize);
+    var data = tctx.getImageData(0, 0, gsize, gsize).data;
+    var out = new Array(gsize * gsize * 3);
+    for (var i = 0, j = 0; i < data.length; i += 4) {
+      out[j++] = data[i]; out[j++] = data[i + 1]; out[j++] = data[i + 2];
+    }
+    return out;
+  }
+
   function sampleFace(ctx2d) {
     var size = 480;
-    var zone = size * 0.72, off = (size - zone) / 2;
+    var g = 96;
+    var region = scan.findCubeRegion(rgbGrid(ctx2d, g), g, g);
+    var zone, off = { x: 0, y: 0 };
+    if (region) {
+      var k = size / g;
+      zone = region.side * k;
+      off = { x: region.x * k, y: region.y * k };
+    } else {
+      zone = size * 0.72;
+      off = { x: (size - zone) / 2, y: (size - zone) / 2 };
+    }
     var cellSize = zone / 3;
     var cells = [];
     for (var r = 0; r < 3; r++) {
       for (var c = 0; c < 3; c++) {
-        var cx = off + c * cellSize, cy = off + r * cellSize;
+        var cx = off.x + c * cellSize, cy = off.y + r * cellSize;
         var pad = cellSize * 0.28;
         var data = ctx2d.getImageData(Math.round(cx + pad), Math.round(cy + pad),
           Math.round(cellSize - 2 * pad), Math.round(cellSize - 2 * pad)).data;
@@ -4790,18 +4896,88 @@ h1, h2, h3 { line-height: 1.25; }
     renderStep();
   }
 
+  RA.scanReview = function (root, initialState, marks, onDone, onCancel) {
+    RA.clear(root);
+    root.className = "pattern-khatam";
+    var p = RA.profiles.active();
+    var wrap = h("div", { class: "screen scan-stage" });
+    wrap.appendChild(ui.topbar({ title: RA.t("scan.checkColors"), back: onCancel, stats: false }));
+    var card = h("div", { class: "card", dir: "ltr" });
+    var net = RA.NetView(card, { state: initialState, palette: (p && p.game.skin) || "classic", cell: 20 });
+    wrap.appendChild(card);
+    var statusEl = h("div", { class: "say", style: { minHeight: "54px", fontSize: "1rem" } }, RA.t("scan.tapFix"));
+    wrap.appendChild(statusEl);
+    var current = null, fixed = false;
+    var palRow = h("div", { class: "palette-pop" });
+    var palette = RA.cubePalette((p && p.game.skin) || "classic");
+    "WYGBRO".split("").forEach(function (c) {
+      palRow.appendChild(h("button", {
+        class: "swatch", style: { background: palette[c] },
+        onclick: function () {
+          if (current == null || current % 9 === 4) return;
+          var s2 = net.state().split("");
+          s2[current] = c;
+          net.setState(s2.join(""));
+          fixed = true;
+          RA.sfx("tap");
+          refresh();
+        }
+      }));
+    });
+    wrap.appendChild(palRow);
+    function refresh() {
+      var v = cube.validate(net.state());
+      if (v.ok) {
+        statusEl.textContent = RA.t("scan.legal") + " " + RA.t("scan.foundStage");
+        confirmBtn.disabled = false;
+        net.mark(current != null ? [current] : []);
+      } else {
+        statusEl.textContent = RA.t("scan.impossible");
+        confirmBtn.disabled = true;
+        var mk = (marks || []).slice();
+        if (v.badPieces) v.badPieces.forEach(function (bp) { mk = mk.concat(bp.slot.facelets); });
+        if (current != null) mk.push(current);
+        net.mark(mk);
+      }
+    }
+    net.onStickerTap(function (idx) {
+      if (idx % 9 === 4) return;
+      current = idx;
+      RA.sfx("tap");
+      refresh();
+    });
+    var confirmBtn = h("button", {
+      class: "btn btn-gold btn-big",
+      onclick: function () {
+        RA.sfx("good");
+        if (fixed && p) { RA.game.checkBadges(p, { type: "fix" }); RA.saveProfile(p); }
+        onDone(net.state());
+      }
+    }, RA.t("scan.looksGood"));
+    wrap.appendChild(h("div", { style: { textAlign: "center" } }, confirmBtn));
+    root.appendChild(wrap);
+    refresh();
+  };
+
+  RA.startScan = function (params) {
+    var live = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    RA.go(live ? "livescan" : "scan", params);
+  };
+
   RA.screen("scan", {
     enter: function (s) {
       var onDone = s.params.onDone || function () { RA.go("map"); };
       var onCancel = s.params.onCancel || function () { RA.go("map"); };
-      scanFlow(s.root, function (facelets) {
+      var save = function (facelets) {
         var p = RA.profiles.active();
         if (p) {
           p.cube = { facelets: facelets, scannedAt: RA.now() };
           RA.saveProfileNow(p);
         }
         onDone(facelets);
-      }, onCancel);
+      };
+      if (s.params.paint) { paintFlow(s.root, save, onCancel); return; }
+      scanFlow(s.root, save, onCancel);
     }
   });
 
@@ -4836,7 +5012,7 @@ h1, h2, h3 { line-height: 1.25; }
           class: "btn btn-gold btn-big",
           onclick: function () {
             RA.sfx("tap");
-            RA.go("scan", {
+            RA.startScan({
               onDone: function (facelets) { runGuided(facelets); },
               onCancel: function () { RA.go("mission", { lessonId: lesson.id }); }
             });
@@ -4914,7 +5090,7 @@ h1, h2, h3 { line-height: 1.25; }
                 if (redo2 === "rescan") redo = "rescan"; else redo = false;
               }
               if (redo === "rescan") {
-                RA.go("scan", {
+                RA.startScan({
                   onDone: function (f2) { runGuided(f2); },
                   onCancel: function () { runGuided(state); }
                 });
@@ -4940,7 +5116,7 @@ h1, h2, h3 { line-height: 1.25; }
               ctx.buttons([
                 { label: RA.t("mission.trust"), fn: resolve },
                 { label: "📷 " + RA.t("mission.verify"), kind: "btn-ghost", fn: function () {
-                    RA.go("scan", {
+                    RA.startScan({
                       onDone: function (f3) {
                         var ok = solver.detectStage(cube.apply(f3, solver.orientYellowUp(f3))) >= lesson.gate;
                         if (!ok) { runGuided(f3); } else { finishNow(); }
@@ -4984,6 +5160,193 @@ h1, h2, h3 { line-height: 1.25; }
     { id: "full", gate: 8, icon: "🏆", key: "ar.target3" }
   ];
 
+  RA.screen("livescan", {
+    enter: function (s) {
+      var root = s.root;
+      root.className = "pattern-khatam";
+      var p = RA.profiles.active();
+      var onDone = s.params.onDone || function () { RA.go("map"); };
+      var onCancel = s.params.onCancel || function () { RA.go("map"); };
+      var stream = null, video = null, timer = null, stopped = false;
+
+      var wrap = h("div", { class: "screen scan-stage" });
+      wrap.appendChild(ui.topbar({
+        title: "✨ " + RA.t("scan.title"),
+        back: function () { cleanup(); onCancel(); }, stats: false
+      }));
+
+      var stage = h("div", { class: "ar-stage", dir: "ltr" });
+      var overlay = hs("svg", { viewBox: "0 0 100 100", class: "ar-overlay" });
+      var ring = hs("rect", { x: 15, y: 15, width: 70, height: 70, rx: 6, fill: "none", stroke: "rgba(255,255,255,0.9)", "stroke-width": 2 });
+      overlay.appendChild(ring);
+      [(15 + 70 / 3), (15 + 140 / 3)].forEach(function (v) {
+        overlay.appendChild(hs("line", { x1: v, y1: 15, x2: v, y2: 85, stroke: "rgba(255,255,255,0.55)", "stroke-width": 0.9 }));
+        overlay.appendChild(hs("line", { x1: 15, y1: v, x2: 85, y2: v, stroke: "rgba(255,255,255,0.55)", "stroke-width": 0.9 }));
+      });
+      stage.appendChild(overlay);
+      var mirrorBox = h("div", { class: "ar-mirror" });
+      stage.appendChild(mirrorBox);
+      wrap.appendChild(stage);
+
+      var palette = RA.cubePalette((p && p.game.skin) || "classic");
+      var dots = h("div", { style: { display: "flex", gap: "8px", justifyContent: "center" } });
+      scan.ORDER.forEach(function (f) {
+        dots.appendChild(h("div", {
+          id: "lsdot-" + f,
+          style: {
+            width: "34px", height: "34px", borderRadius: "10px",
+            background: "rgba(35,57,91,0.15)", border: "3px solid var(--paper)"
+          }
+        }));
+      });
+      wrap.appendChild(dots);
+      var say = h("div", { class: "say" }, "");
+      wrap.appendChild(say);
+      var controls = h("div", { class: "lesson-controls" });
+      wrap.appendChild(controls);
+      root.appendChild(wrap);
+
+      var mirror = RA.CubeView(mirrorBox, { size: 130, palette: (p && p.game.skin) || "classic", orbit: false });
+      var orient = { F: [-0.15, 0.18], R: [-1.65, 0.18], B: [Math.PI - 0.15, 0.18], L: [1.45, 0.18], U: [-0.15, 1.35], D: [-0.15, -1.35] };
+
+      controls.appendChild(h("button", {
+        class: "btn btn-ghost",
+        onclick: function () { RA.sfx("tap"); cleanup(); RA.go("scan", s.params); }
+      }, "📷 " + RA.t("scan.photoMode")));
+      controls.appendChild(h("button", {
+        class: "btn btn-ghost",
+        onclick: function () { RA.sfx("tap"); cleanup(); RA.go("scan", Object.assign({}, s.params, { paint: true })); }
+      }, "🎨 " + RA.t("scan.manual")));
+
+      var faces = {};
+      var faceIdx = 0;
+      var lastRead = null, agree = 0;
+      var startedAt = Date.now();
+
+      function currentFace() { return scan.ORDER[faceIdx]; }
+      function prompt() {
+        var f = currentFace();
+        say.textContent = RA.t("scan.face." + f);
+        mirror.orbitTo(orient[f][0], orient[f][1]);
+        lastRead = null; agree = 0;
+        startedAt = Date.now();
+      }
+
+      var sampleCanvas = document.createElement("canvas");
+      sampleCanvas.width = 300; sampleCanvas.height = 300;
+      var sctx = sampleCanvas.getContext("2d", { willReadFrequently: true });
+
+      function sampleFrame() {
+        if (!video || video.readyState < 2) return null;
+        var vw = video.videoWidth, vh = video.videoHeight;
+        if (!vw || !vh) return null;
+        var side = Math.min(vw, vh) * 0.7;
+        sctx.drawImage(video, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, 300, 300);
+        var cells = [];
+        for (var r = 0; r < 3; r++) {
+          for (var c = 0; c < 3; c++) {
+            var data = sctx.getImageData(c * 100 + 30, r * 100 + 30, 40, 40).data;
+            var px = [];
+            for (var i = 0; i < data.length; i += 4) {
+              px.push([data[i], data[i + 1], data[i + 2], data[i] + data[i + 1] + data[i + 2]]);
+            }
+            px.sort(function (a, b) { return a[3] - b[3]; });
+            var lo = Math.floor(px.length * 0.2), hi = Math.ceil(px.length * 0.8);
+            var sum = [0, 0, 0], n = 0;
+            for (var j = lo; j < hi; j++) { sum[0] += px[j][0]; sum[1] += px[j][1]; sum[2] += px[j][2]; n++; }
+            cells.push([sum[0] / n, sum[1] / n, sum[2] / n]);
+          }
+        }
+        return cells;
+      }
+
+      function tick() {
+        if (stopped) return;
+        var cells = sampleFrame();
+        if (!cells) return;
+        var face = currentFace();
+        var res = scan.readFaceLive(cells, scan.EXPECT[face]);
+        var promising = res.centerOk && res.conf > 0.05;
+        ring.setAttribute("stroke", promising ? "#35c46f" : "rgba(255,255,255,0.9)");
+        ring.setAttribute("stroke-width", promising ? 3.5 : 2);
+        if (promising) {
+          if (lastRead === res.colors) agree++;
+          else { lastRead = res.colors; agree = 1; }
+          if (agree >= 2) lockFace(res.colors);
+        } else {
+          agree = 0;
+          if (Date.now() - startedAt > 14000) {
+            startedAt = Date.now();
+            ui.toast(RA.t("scan.liveTip"), 2600);
+          }
+        }
+      }
+
+      function lockFace(colors) {
+        var f = currentFace();
+        faces[f] = colors;
+        RA.sfx("good");
+        var dot = document.getElementById("lsdot-" + f);
+        if (dot) { dot.style.background = palette[scan.EXPECT[f]]; }
+        faceIdx++;
+        if (faceIdx >= scan.ORDER.length) { finish(); return; }
+        prompt();
+      }
+
+      function finish() {
+        cleanup();
+        var faceIdxMap = { U: 0, R: 1, F: 2, D: 3, L: 4, B: 5 };
+        var arr = new Array(54);
+        Object.keys(faces).forEach(function (f) {
+          for (var i = 0; i < 9; i++) arr[faceIdxMap[f] * 9 + i] = faces[f][i];
+        });
+        var facelets = arr.join("");
+        var p2 = RA.profiles.active();
+        if (p2) {
+          p2.game.scans = (p2.game.scans || 0) + 1;
+          RA.game.checkBadges(p2, { type: "scan" });
+          RA.saveProfile(p2);
+        }
+        RA.scanReview(root, facelets, [], function (finalState) {
+          var p3 = RA.profiles.active();
+          if (p3) {
+            p3.cube = { facelets: finalState, scannedAt: RA.now() };
+            RA.saveProfileNow(p3);
+          }
+          onDone(finalState);
+        }, function () { RA.go("livescan", s.params); });
+      }
+
+      function cleanup() {
+        stopped = true;
+        if (timer) clearInterval(timer);
+        if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+      }
+      s.cleanup = cleanup;
+
+      (async function () {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 1280 } },
+            audio: false
+          });
+          video = h("video", { autoplay: true, muted: true, class: "ar-video" });
+          video.setAttribute("playsinline", "");
+          video.srcObject = stream;
+          stage.insertBefore(video, overlay);
+          await video.play();
+          prompt();
+          timer = setInterval(tick, 220);
+        } catch (e) {
+          ui.toast(RA.t("ar.nocam"), 2600);
+          cleanup();
+          RA.go("scan", s.params);
+        }
+      })();
+    },
+    exit: function (s) { if (s && s.cleanup) s.cleanup(); }
+  });
+
   RA.screen("ar", {
     enter: function (s) {
       var root = s.root;
@@ -5023,7 +5386,7 @@ h1, h2, h3 { line-height: 1.25; }
         class: "btn " + (fresh ? "btn-ghost" : "btn-gold btn-big"),
         onclick: function () {
           RA.sfx("tap");
-          RA.go("scan", {
+          RA.startScan({
             onDone: function (f) { startAr(f, TARGETS[chosen].gate); },
             onCancel: function () { RA.go("ar"); }
           });
