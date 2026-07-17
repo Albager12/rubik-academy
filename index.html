@@ -2224,6 +2224,66 @@ h1, h2, h3 { line-height: 1.25; }
     return best;
   };
 
+  scan.homographyFromQuad = function (q) {
+    var x0 = q[0][0], y0 = q[0][1], x1 = q[1][0], y1 = q[1][1];
+    var x2 = q[2][0], y2 = q[2][1], x3 = q[3][0], y3 = q[3][1];
+    var dx1 = x1 - x2, dx2 = x3 - x2, dy1 = y1 - y2, dy2 = y3 - y2;
+    var sx = x0 - x1 + x2 - x3, sy = y0 - y1 + y2 - y3;
+    var den = dx1 * dy2 - dx2 * dy1;
+    var g = 0, hh2 = 0;
+    if (Math.abs(den) > 1e-9 && (Math.abs(sx) > 1e-9 || Math.abs(sy) > 1e-9)) {
+      g = (sx * dy2 - dx2 * sy) / den;
+      hh2 = (dx1 * sy - sx * dy1) / den;
+    }
+    var a = x1 - x0 + g * x1, b = x3 - x0 + hh2 * x3, c = x0;
+    var d = y1 - y0 + g * y1, e = y3 - y0 + hh2 * y3, f = y0;
+    return function (u, v) {
+      var w2 = g * u + hh2 * v + 1;
+      return [(a * u + b * v + c) / w2, (d * u + e * v + f) / w2];
+    };
+  };
+
+  scan.hexQuads = function (pts) {
+    var C = pts[0], T = pts[1], UR = pts[2], LR = pts[3], B = pts[4], LL = pts[5], UL = pts[6];
+    return [
+      [UL, T, UR, C],   // upper face
+      [C, UR, LR, B],   // right face
+      [UL, C, B, LL]    // left face
+    ];
+  };
+
+  scan.rotFace = function (colors, k) {
+    k = ((k % 4) + 4) % 4;
+    for (var t = 0; t < k; t++) {
+      var out = "";
+      for (var i = 0; i < 9; i++) {
+        var r = Math.floor(i / 3), c = i % 3;
+        out += colors[(2 - c) * 3 + r];
+      }
+      colors = out;
+    }
+    return colors;
+  };
+
+  scan.resolveRotations = function (byLetter) {
+    var cube2 = (g.RA && g.RA.cube) || null;
+    if (!cube2) return null;
+    var letters = ["U", "R", "F", "D", "L", "B"];
+    var rots = [0, 0, 0, 0, 0, 0];
+    for (var n = 0; n < 4096; n++) {
+      var k = n;
+      for (var i = 0; i < 6; i++) { rots[i] = k & 3; k >>= 2; }
+      var facelets = "";
+      for (var f = 0; f < 6; f++) {
+        facelets += scan.rotFace(byLetter[letters[f]], rots[f]);
+      }
+      if (cube2.validate(facelets).ok) return facelets;
+    }
+    return null;
+  };
+
+  scan.FACE_OF_COLOR = { W: "U", Y: "D", G: "F", B: "B", R: "R", O: "L" };
+
   scan.quality = function (lumGrid, w, hh) {
     var mean = 0, i;
     for (i = 0; i < lumGrid.length; i++) mean += lumGrid[i];
@@ -2580,6 +2640,21 @@ h1, h2, h3 { line-height: 1.25; }
   d["scan.reset"] = "All done cube";
   d["scan.photoMode"] = "Photos instead";
   d["scan.liveTip"] = "Bring it closer, or tap the cube on the screen";
+  d["scan.capture"] = "Capture";
+  d["scan.twoPhoto"] = "Two corner photos";
+  d["two.pick1"] = "Corner photo 1: three sides visible";
+  d["two.pick2"] = "Corner photo 2: the OTHER three sides";
+  d["two.tap.0"] = "Tap the middle point where the 3 sides meet";
+  d["two.tap.1"] = "Now tap the TOP corner of the cube";
+  d["two.tap.n"] = "Next corner, clockwise ({n}/7)";
+  d["two.ready"] = "Great! Press Done";
+  d["two.undo"] = "Undo";
+  d["two.done1"] = "Now the second photo — other corner!";
+  d["two.missing"] = "Still missing: {colors}";
+  d["two.sameFace"] = "I see the same side twice — check the points";
+  d["paint.tooMany"] = "{color}: {n} — more than 9!";
+  d["paint.badPiece"] = "That piece can't exist — check the glowing squares";
+  d["paint.swapped"] = "Colors count fine, but two pieces look swapped";
 
   d["ar.title"] = "Magic Camera";
   d["ar.pickTarget"] = "What shall we finish today?";
@@ -2913,6 +2988,21 @@ h1, h2, h3 { line-height: 1.25; }
   d["scan.reset"] = "مكعب مرتب";
   d["scan.photoMode"] = "صور بدلًا";
   d["scan.liveTip"] = "قرّبه أكثر، أو المس المكعب على الشاشة";
+  d["scan.capture"] = "التقط";
+  d["scan.twoPhoto"] = "صورتان بالزاوية";
+  d["two.pick1"] = "صورة زاوية ١: ثلاثة أوجه ظاهرة";
+  d["two.pick2"] = "صورة زاوية ٢: الأوجه الثلاثة الأخرى";
+  d["two.tap.0"] = "المس النقطة الوسطى حيث تلتقي الأوجه الثلاثة";
+  d["two.tap.1"] = "الآن المس رأس المكعب الأعلى";
+  d["two.tap.n"] = "الركن التالي مع عقارب الساعة ({n}/٧)";
+  d["two.ready"] = "رائع! اضغط تم";
+  d["two.undo"] = "تراجع";
+  d["two.done1"] = "الآن الصورة الثانية — الزاوية الأخرى!";
+  d["two.missing"] = "ما زال ينقصنا: {colors}";
+  d["two.sameFace"] = "أرى الوجه نفسه مرتين — تأكد من النقاط";
+  d["paint.tooMany"] = "{color}: {n} — أكثر من ٩!";
+  d["paint.badPiece"] = "هذه القطعة لا يمكن أن توجد — انظر للمربعات المضيئة";
+  d["paint.swapped"] = "العدد صحيح لكن قطعتين متبادلتان";
 
   d["ar.title"] = "الكاميرا السحرية";
   d["ar.pickTarget"] = "ماذا سنُنجز اليوم؟";
@@ -3677,14 +3767,13 @@ h1, h2, h3 { line-height: 1.25; }
 
       var today = RA.today();
       var dailyDone = p.game.daily && p.game.daily.date === today && p.game.daily.done;
-      wrap.appendChild(h("div", { style: { display: "flex", flexDirection: "column", gap: "10px", alignItems: "center" } },
+      wrap.appendChild(h("div", { style: { display: "flex", gap: "10px", justifyContent: "center", flexWrap: "wrap" } },
         h("button", {
-          class: "btn btn-gold btn-big",
-          style: { width: "min(100%, 380px)" },
+          class: "btn btn-gold",
           onclick: function () { RA.sfx("tap"); RA.go("ar"); }
-        }, "🎥 " + RA.t("ar.title") + " — " + RA.t("map.freeSolve")),
+        }, "🎥 " + RA.t("ar.title")),
         h("button", {
-          class: "btn " + (dailyDone ? "btn-ghost" : "btn-ghost"),
+          class: "btn btn-ghost",
           onclick: function () { RA.sfx("tap"); if (!dailyDone) RA.startDaily(); }
         }, (dailyDone ? "✓ " : "🎯 ") + RA.t(dailyDone ? "map.dailyDone" : "map.daily"))
       ));
@@ -4749,34 +4838,63 @@ h1, h2, h3 { line-height: 1.25; }
     var current = "W";
     var palRow = h("div", { class: "palette-pop" });
     var palette = RA.cubePalette((p && p.game.skin) || "classic");
+    var badges = {};
     "WYGBRO".split("").forEach(function (c) {
+      var badge = h("span", {
+        style: {
+          position: "absolute", insetInlineEnd: "-6px", top: "-8px",
+          background: "var(--paper)", borderRadius: "999px",
+          minWidth: "22px", padding: "1px 4px", fontSize: "0.75rem",
+          fontWeight: "800", border: "2px solid var(--sand-2)", color: "var(--ink)"
+        }
+      }, "٩");
+      badges[c] = badge;
       var sw = h("button", {
         class: "swatch" + (c === current ? " sel" : ""),
-        style: { background: palette[c] },
+        style: { background: palette[c], position: "relative" },
         onclick: function () {
           current = c;
           palRow.querySelectorAll(".swatch").forEach(function (el) { el.classList.remove("sel"); });
           sw.classList.add("sel");
           RA.sfx("tap");
         }
-      });
+      }, badge);
       palRow.appendChild(sw);
     });
     wrap.appendChild(palRow);
-    function refresh() {
-      var v = cube.validate(net.state());
+    function refresh(tappedIdx) {
+      var st = net.state();
+      var counts = {};
+      for (var i = 0; i < 54; i++) counts[st[i]] = (counts[st[i]] || 0) + 1;
+      "WYGBRO".split("").forEach(function (c) {
+        var n = counts[c] || 0;
+        badges[c].textContent = RA.fmtNum(n);
+        badges[c].style.background = n === 9 ? "var(--paper)" : (n > 9 ? "var(--bad)" : "var(--gold-bright)");
+        badges[c].style.color = n > 9 ? "#fff" : "var(--ink)";
+      });
+      var v = cube.validate(st);
       if (v.ok) {
         statusEl.textContent = RA.t("scan.legal");
         confirmBtn.disabled = false;
         net.mark([]);
       } else {
-        statusEl.textContent = RA.t("scan.impossible");
-        confirmBtn.disabled = true;
-        if (v.badPieces) {
-          var marks = [];
-          v.badPieces.forEach(function (bp) { marks = marks.concat(bp.slot.facelets); });
-          net.mark(marks);
+        var msg = RA.t("scan.impossible");
+        var over = "WYGBRO".split("").filter(function (c) { return (counts[c] || 0) > 9; });
+        if (over.length) {
+          msg = RA.t("paint.tooMany", { color: RA.t("color." + over[0]), n: RA.fmtNum(counts[over[0]]) });
+        } else if (v.badPieces && v.badPieces.length) {
+          msg = RA.t("paint.badPiece");
+        } else if (v.errors && (v.errors.indexOf("parity") >= 0 || v.errors.indexOf("flip") >= 0 || v.errors.indexOf("twist") >= 0)) {
+          msg = RA.t("paint.swapped");
         }
+        statusEl.textContent = msg;
+        confirmBtn.disabled = true;
+        var marks = [];
+        if (v.badPieces) {
+          v.badPieces.forEach(function (bp) { marks = marks.concat(bp.slot.facelets); });
+        }
+        net.mark(marks);
+        if (tappedIdx != null && marks.indexOf(tappedIdx) >= 0) RA.sfx("bad");
       }
     }
     net.onStickerTap(function (idx) {
@@ -4785,7 +4903,7 @@ h1, h2, h3 { line-height: 1.25; }
       s[idx] = current;
       net.setState(s.join(""));
       RA.sfx("tap");
-      refresh();
+      refresh(idx);
     });
     var confirmBtn = h("button", {
       class: "btn btn-gold btn-big",
@@ -4886,6 +5004,10 @@ h1, h2, h3 { line-height: 1.25; }
         }, RA.t("scan.retake")) : null,
         h("button", {
           class: "btn btn-ghost",
+          onclick: function () { RA.sfx("tap"); RA.go("twophoto", { onDone: onDone, onCancel: onCancel }); }
+        }, "📐 " + RA.t("scan.twoPhoto")),
+        h("button", {
+          class: "btn btn-ghost",
           onclick: function () { RA.sfx("tap"); paintFlow(root, onDone, onCancel); }
         }, "🎨 " + RA.t("scan.manual"))
       ));
@@ -4974,6 +5096,211 @@ h1, h2, h3 { line-height: 1.25; }
 
     renderStep();
   }
+
+  async function decodeFull(file, maxDim) {
+    var bmp;
+    try {
+      bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+    } catch (e) {
+      bmp = await new Promise(function (resolve, reject) {
+        var img = new Image();
+        img.onload = function () { resolve(img); };
+        img.onerror = reject;
+        img.src = URL.createObjectURL(file);
+      });
+    }
+    var k = Math.min(1, (maxDim || 1100) / Math.max(bmp.width, bmp.height));
+    var canvas = document.createElement("canvas");
+    canvas.width = Math.round(bmp.width * k);
+    canvas.height = Math.round(bmp.height * k);
+    canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    if (bmp.close) bmp.close();
+    return canvas;
+  }
+
+  function sampleQuadCells(ctx2d, quad) {
+    var H = scan.homographyFromQuad(quad);
+    var cells = [];
+    for (var r = 0; r < 3; r++) {
+      for (var c = 0; c < 3; c++) {
+        var sum = [0, 0, 0], n = 0;
+        for (var du = -1; du <= 1; du++) {
+          for (var dv = -1; dv <= 1; dv++) {
+            var u = (c + 0.5 + du * 0.16) / 3, v = (r + 0.5 + dv * 0.16) / 3;
+            var pt = H(u, v);
+            var x = Math.round(pt[0]), y = Math.round(pt[1]);
+            if (x < 1 || y < 1 || x >= ctx2d.canvas.width - 1 || y >= ctx2d.canvas.height - 1) continue;
+            var d = ctx2d.getImageData(x - 1, y - 1, 3, 3).data;
+            for (var i = 0; i < d.length; i += 4) {
+              sum[0] += d[i]; sum[1] += d[i + 1]; sum[2] += d[i + 2]; n++;
+            }
+          }
+        }
+        cells.push(n ? [sum[0] / n, sum[1] / n, sum[2] / n] : [128, 128, 128]);
+      }
+    }
+    return cells;
+  }
+
+  RA.screen("twophoto", {
+    enter: function (s) {
+      var root = s.root;
+      root.className = "pattern-khatam";
+      var p = RA.profiles.active();
+      var onDone = s.params.onDone || function () { RA.go("map"); };
+      var onCancel = s.params.onCancel || function () { RA.go("map"); };
+      var byLetter = {};
+      var photoNo = 1;
+
+      function save(facelets) {
+        var p2 = RA.profiles.active();
+        if (p2) {
+          p2.cube = { facelets: facelets, scannedAt: RA.now() };
+          RA.saveProfileNow(p2);
+        }
+        onDone(facelets);
+      }
+
+      function photoStep() {
+        RA.clear(root);
+        var wrap = h("div", { class: "screen scan-stage" });
+        wrap.appendChild(ui.topbar({ title: "📐 " + RA.t("scan.twoPhoto"), back: onCancel, stats: false }));
+        wrap.appendChild(h("div", { class: "say" }, RA.t(photoNo === 1 ? "two.pick1" : "two.pick2")));
+        var input = h("input", { type: "file", accept: "image/*", style: { display: "none" } });
+        input.addEventListener("change", async function () {
+          var file = input.files && input.files[0];
+          if (!file) return;
+          try {
+            var canvas = await decodeFull(file, 1100);
+            tapStep(canvas);
+          } catch (e) { ui.toast(RA.t("scan.blurry")); }
+        });
+        wrap.appendChild(input);
+        wrap.appendChild(h("div", { style: { textAlign: "center" } },
+          h("button", {
+            class: "btn btn-gold btn-big",
+            onclick: function () { RA.sfx("tap"); input.click(); }
+          }, "🖼 " + RA.t("scan.takePhoto"))));
+        if (Object.keys(byLetter).length) {
+          var row = h("div", { style: { display: "flex", gap: "8px", justifyContent: "center", flexWrap: "wrap" } });
+          var palette = RA.cubePalette((p && p.game.skin) || "classic");
+          Object.keys(byLetter).forEach(function (L) {
+            var mini = h("div", {
+              style: { width: "44px", height: "44px", display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "1px", background: "var(--paper)", borderRadius: "8px", padding: "3px" }
+            });
+            for (var i = 0; i < 9; i++) {
+              mini.appendChild(h("div", { style: { background: palette[byLetter[L][i]], borderRadius: "2px" } }));
+            }
+            row.appendChild(mini);
+          });
+          wrap.appendChild(row);
+        }
+        root.appendChild(wrap);
+      }
+
+      function tapStep(canvas) {
+        RA.clear(root);
+        var wrap = h("div", { class: "screen scan-stage" });
+        wrap.appendChild(ui.topbar({ title: "📐 " + RA.t("scan.twoPhoto"), back: function () { photoStep(); }, stats: false }));
+        var holder = h("div", { style: { position: "relative", borderRadius: "var(--r-l)", overflow: "hidden" }, dir: "ltr" });
+        var img = h("img", { src: canvas.toDataURL("image/jpeg", 0.85), style: { width: "100%", display: "block" } });
+        holder.appendChild(img);
+        var ov = hs("svg", { style: { position: "absolute", inset: "0", width: "100%", height: "100%", pointerEvents: "none" } });
+        holder.appendChild(ov);
+        wrap.appendChild(holder);
+        var sayEl = h("div", { class: "say" }, RA.t("two.tap.0"));
+        wrap.appendChild(sayEl);
+        var pts = [];
+        function redraw() {
+          RA.clear(ov);
+          var w = img.clientWidth, hh2 = img.clientHeight;
+          ov.setAttribute("viewBox", "0 0 " + w + " " + hh2);
+          if (pts.length >= 2) {
+            var d = "";
+            for (var i = 1; i < pts.length; i++) {
+              d += (i === 1 ? "M" : "L") + pts[i][0] * w + " " + pts[i][1] * hh2;
+            }
+            ov.appendChild(hs("path", { d: d, fill: "none", stroke: "#ffd93d", "stroke-width": 3 }));
+          }
+          pts.forEach(function (pt2, i) {
+            ov.appendChild(hs("circle", { cx: pt2[0] * w, cy: pt2[1] * hh2, r: 12, fill: i === 0 ? "#ff6b6b" : "#ffd93d", stroke: "#23395b", "stroke-width": 3 }));
+            ov.appendChild(hs("text", { x: pt2[0] * w, y: pt2[1] * hh2 + 5, "text-anchor": "middle", "font-size": 13, "font-weight": 800, fill: "#23395b" }, RA.fmtNum(i + 1)));
+          });
+        }
+        holder.addEventListener("pointerdown", function (ev) {
+          if (pts.length >= 7) return;
+          var r = img.getBoundingClientRect();
+          pts.push([(ev.clientX - r.left) / r.width, (ev.clientY - r.top) / r.height]);
+          RA.sfx("tap");
+          redraw();
+          sayEl.textContent = pts.length === 0 ? RA.t("two.tap.0")
+            : pts.length === 1 ? RA.t("two.tap.1")
+            : pts.length < 7 ? RA.t("two.tap.n", { n: RA.fmtNum(pts.length + 1) })
+            : RA.t("two.ready");
+          if (pts.length === 7) doneBtn.disabled = false;
+        });
+        var doneBtn = h("button", {
+          class: "btn btn-gold btn-big", disabled: true,
+          onclick: function () {
+            RA.sfx("good");
+            var ctx2d = canvas.getContext("2d", { willReadFrequently: true });
+            var scaled = pts.map(function (pt2) { return [pt2[0] * canvas.width, pt2[1] * canvas.height]; });
+            var quads = scan.hexQuads(scaled);
+            var got = [];
+            for (var q = 0; q < 3; q++) {
+              var cells = sampleQuadCells(ctx2d, quads[q]);
+              var centerColor = scan.roughCenterColor(cells[4]);
+              var read = scan.readFaceLive(cells, centerColor);
+              got.push({ color: centerColor, cells: read.colors });
+            }
+            var colors = got.map(function (g2) { return g2.color; });
+            if (new Set(colors).size !== 3) {
+              ui.toast(RA.t("two.sameFace"), 2600);
+              return;
+            }
+            got.forEach(function (g2) {
+              byLetter[scan.FACE_OF_COLOR[g2.color]] = g2.cells;
+            });
+            if (photoNo === 1) {
+              photoNo = 2;
+              ui.toast(RA.t("two.done1"), 2600);
+              photoStep();
+            } else {
+              finishAll();
+            }
+          }
+        }, "✓ " + RA.t("ui.done"));
+        wrap.appendChild(h("div", { class: "lesson-controls" },
+          doneBtn,
+          h("button", {
+            class: "btn btn-ghost",
+            onclick: function () { RA.sfx("tap"); pts.pop(); redraw(); doneBtn.disabled = pts.length < 7; }
+          }, "↩ " + RA.t("two.undo"))));
+        root.appendChild(wrap);
+        setTimeout(redraw, 120);
+      }
+
+      function finishAll() {
+        var letters = ["U", "R", "F", "D", "L", "B"];
+        var missing = letters.filter(function (L) { return !byLetter[L]; });
+        if (missing.length) {
+          var names = missing.map(function (L) {
+            var col = Object.keys(scan.FACE_OF_COLOR).filter(function (c) { return scan.FACE_OF_COLOR[c] === L; })[0];
+            return RA.t("color." + col);
+          }).join("، ");
+          ui.toast(RA.t("two.missing", { colors: names }), 3200);
+          photoNo = 2;
+          photoStep();
+          return;
+        }
+        var resolved = scan.resolveRotations(byLetter);
+        var facelets = resolved || letters.map(function (L) { return byLetter[L]; }).join("");
+        RA.scanReview(root, facelets, [], save, function () { photoNo = 1; byLetter = {}; photoStep(); });
+      }
+
+      photoStep();
+    }
+  });
 
   RA.scanReview = function (root, initialState, marks, onDone, onCancel) {
     RA.clear(root);
@@ -5355,6 +5682,14 @@ h1, h2, h3 { line-height: 1.25; }
       var mirror = RA.CubeView(mirrorBox, { size: 130, palette: (p && p.game.skin) || "classic", orbit: false });
       var orient = { F: [-0.15, 0.18], R: [-1.65, 0.18], B: [Math.PI - 0.15, 0.18], L: [1.45, 0.18], U: [-0.15, 1.35], D: [-0.15, -1.35] };
 
+      var captureBtn = h("button", {
+        class: "btn btn-gold",
+        disabled: true,
+        onclick: function () {
+          if (lastPlausible) { RA.sfx("tap"); lockFace(lastPlausible); }
+        }
+      }, "✓ " + RA.t("scan.capture"));
+      controls.appendChild(captureBtn);
       controls.appendChild(h("button", {
         class: "btn btn-ghost",
         onclick: function () { RA.sfx("tap"); cleanup(); RA.go("scan", s.params); }
@@ -5367,6 +5702,7 @@ h1, h2, h3 { line-height: 1.25; }
       var faces = {};
       var faceIdx = 0;
       var lastRead = null, agree = 0;
+      var lastPlausible = null; // latest centerOk reading (for manual capture)
       var startedAt = Date.now();
 
       function currentFace() { return scan.ORDER[faceIdx]; }
@@ -5375,6 +5711,8 @@ h1, h2, h3 { line-height: 1.25; }
         say.textContent = RA.t("scan.face." + f);
         mirror.orbitTo(orient[f][0], orient[f][1]);
         lastRead = null; agree = 0;
+        lastPlausible = null;
+        if (captureBtn) captureBtn.disabled = true;
         startedAt = Date.now();
       }
 
@@ -5452,6 +5790,10 @@ h1, h2, h3 { line-height: 1.25; }
         var face = currentFace();
         var res = scan.readFaceLive(cells, scan.EXPECT[face]);
         showChips(res.centerOk ? res.colors : null);
+        if (res.centerOk) {
+          lastPlausible = res.colors;
+          captureBtn.disabled = false;
+        }
         var promising = res.centerOk && res.conf > 0.05 && res.maxDist < 48;
         ring.setAttribute("stroke", promising ? "#35c46f" : "rgba(255,255,255,0.9)");
         ring.setAttribute("stroke-width", promising ? 3.5 : 2);
