@@ -881,6 +881,141 @@ h1, h2, h3 { line-height: 1.25; }
     return { ok: errors.length === 0, errors: errors };
   };
 
+  cube.fitLegal = function (state, locked) {
+    var lockedSet = {};
+    (locked || []).forEach(function (i) { lockedSet[i] = 1; });
+    for (var f = 0; f < 6; f++) lockedSet[f * 9 + 4] = 1;
+
+    var UD = [cube.centerColor(state, "U"), cube.centerColor(state, "D")];
+
+    function buildPieces(slots) {
+      return slots.map(function (s) { return cube.homeColors(state, s); });
+    }
+    function constraintsOf(slot) {
+      var cons = [];
+      slot.facelets.forEach(function (fi, k) {
+        if (lockedSet[fi] && fi % 9 !== 4) cons.push([k, state[fi]]);
+      });
+      return cons;
+    }
+    function edgeArrs(piece) { return [[piece[0], piece[1]], [piece[1], piece[0]]]; }
+    function cornerArrs(piece) {
+      return [
+        [piece[0], piece[1], piece[2]],
+        [piece[1], piece[2], piece[0]],
+        [piece[2], piece[0], piece[1]]
+      ];
+    }
+    function pieceIndexOf(slots, pieces, slot) {
+      var pc = cube.pieceAt(state, slot);
+      for (var i = 0; i < pieces.length; i++) {
+        if (pieces[i].length === pc.length &&
+            pieces[i].every(function (c) { return pc.indexOf(c) >= 0; }) &&
+            pc.every(function (c) { return pieces[i].indexOf(c) >= 0; })) return i;
+      }
+      return -1;
+    }
+
+    function solve(slots, pieces, arrsFn) {
+      var idx = slots.map(function (s, i) { return i; });
+      idx.sort(function (a, b) {
+        return constraintsOf(slots[b]).length - constraintsOf(slots[a]).length;
+      });
+      var used = new Array(pieces.length).fill(false);
+      var assign = new Array(slots.length).fill(null);
+      var curPiece = slots.map(function (s) { return pieceIndexOf(slots, pieces, s); });
+      var steps = 0;
+      function bt(k) {
+        if (++steps > 40000) return false;
+        if (k === idx.length) return true;
+        var si = idx[k];
+        var cons = constraintsOf(slots[si]);
+        var cand = [];
+        if (curPiece[si] >= 0 && !used[curPiece[si]]) cand.push(curPiece[si]);
+        for (var pi = 0; pi < pieces.length; pi++) {
+          if (!used[pi] && pi !== curPiece[si]) cand.push(pi);
+        }
+        for (var ci = 0; ci < cand.length; ci++) {
+          var pi2 = cand[ci];
+          var arrs = arrsFn(pieces[pi2]);
+          var scored = arrs.map(function (arr) {
+            var match = 0;
+            slots[si].facelets.forEach(function (fi, kk) {
+              if (state[fi] === arr[kk]) match++;
+            });
+            return { arr: arr, match: match };
+          }).sort(function (a, b) { return b.match - a.match; });
+          for (var ai = 0; ai < scored.length; ai++) {
+            var arr = scored[ai].arr;
+            var ok = cons.every(function (c) { return arr[c[0]] === c[1]; });
+            if (!ok) continue;
+            used[pi2] = true;
+            assign[si] = { piece: pi2, arr: arr };
+            if (bt(k + 1)) return true;
+            used[pi2] = false;
+            assign[si] = null;
+          }
+        }
+        return false;
+      }
+      return bt(0) ? assign : null;
+    }
+
+    var eAssign = solve(EDGE_SLOTS, buildPieces(EDGE_SLOTS), edgeArrs);
+    var cAssign = solve(CORNER_SLOTS, buildPieces(CORNER_SLOTS), cornerArrs);
+    if (!eAssign || !cAssign) return null;
+
+    function emit() {
+      var arr = state.split("");
+      EDGE_SLOTS.forEach(function (s, i) {
+        s.facelets.forEach(function (fi, k) { arr[fi] = eAssign[i].arr[k]; });
+      });
+      CORNER_SLOTS.forEach(function (s, i) {
+        s.facelets.forEach(function (fi, k) { arr[fi] = cAssign[i].arr[k]; });
+      });
+      return arr.join("");
+    }
+
+    var freeE = [], freeC = [];
+    EDGE_SLOTS.forEach(function (s, i) { if (!constraintsOf(s).length) freeE.push(i); });
+    CORNER_SLOTS.forEach(function (s, i) { if (!constraintsOf(s).length) freeC.push(i); });
+
+    for (var attempt = 0; attempt < 6; attempt++) {
+      var candidate = emit();
+      var v = cube.validate(candidate);
+      if (v.ok) return candidate;
+      var errs = v.errors || [];
+      if (errs.indexOf("parity") >= 0) {
+        if (freeE.length >= 2) {
+          var a = freeE[0], b = freeE[1];
+          var tmp = eAssign[a]; eAssign[a] = eAssign[b]; eAssign[b] = tmp;
+        } else if (freeC.length >= 2) {
+          var a2 = freeC[0], b2 = freeC[1];
+          var tmp2 = cAssign[a2]; cAssign[a2] = cAssign[b2]; cAssign[b2] = tmp2;
+        } else return null;
+      } else if (errs.indexOf("flip") >= 0) {
+        if (!freeE.length) return null;
+        var fe = eAssign[freeE[0]];
+        fe.arr = [fe.arr[1], fe.arr[0]];
+      } else if (errs.indexOf("twist") >= 0) {
+        if (!freeC.length) return null;
+        var fc = cAssign[freeC[0]];
+        fc.arr = [fc.arr[1], fc.arr[2], fc.arr[0]];
+      } else return null;
+    }
+    return null;
+  };
+
+  cube.fitLegalProgressive = function (state, lockedOrdered) {
+    var locks = lockedOrdered.slice();
+    for (var drop = 0; drop <= lockedOrdered.length; drop++) {
+      var fit = cube.fitLegal(state, locks);
+      if (fit) return { state: fit, kept: locks.slice() };
+      locks.shift();
+    }
+    return { state: cube.SOLVED, kept: [] };
+  };
+
   var SCRAMBLE_FACES = ["U", "D", "L", "R", "F", "B"];
   var AXIS_OF = { U: "y", D: "y", L: "x", R: "x", F: "z", B: "z" };
   cube.scramble = function (rand, len) {
@@ -2213,13 +2348,7 @@ h1, h2, h3 { line-height: 1.25; }
         }
       }
     } else {
-      var minSide = Math.floor(Math.min(w, hh) * 0.3);
-      for (var side2 = minSide; side2 <= Math.min(w, hh); side2 = Math.floor(side2 * 1.25)) {
-        var step2 = Math.max(3, Math.floor(side2 * 0.14));
-        for (var yy0 = 0; yy0 + side2 <= hh; yy0 += step2) {
-          for (var xx0 = 0; xx0 + side2 <= w; xx0 += step2) consider(xx0, yy0, side2);
-        }
-      }
+      return null;
     }
     return best;
   };
@@ -2653,6 +2782,8 @@ h1, h2, h3 { line-height: 1.25; }
   d["two.missing"] = "Still missing: {colors}";
   d["two.sameFace"] = "I see the same side twice — check the points";
   d["paint.tooMany"] = "{color}: {n} — more than 9!";
+  d["paint.rebalanced"] = "I rearranged the rest to keep it possible ✨";
+  d["scan.reviewAll"] = "All done! Tap any face to redo it, or continue";
   d["paint.badPiece"] = "That piece can't exist — check the glowing squares";
   d["paint.swapped"] = "Colors count fine, but two pieces look swapped";
 
@@ -3001,6 +3132,8 @@ h1, h2, h3 { line-height: 1.25; }
   d["two.missing"] = "ما زال ينقصنا: {colors}";
   d["two.sameFace"] = "أرى الوجه نفسه مرتين — تأكد من النقاط";
   d["paint.tooMany"] = "{color}: {n} — أكثر من ٩!";
+  d["paint.rebalanced"] = "رتّبت الباقي ليبقى ممكنًا ✨";
+  d["scan.reviewAll"] = "اكتمل! المس أي وجه لإعادته، أو تابع";
   d["paint.badPiece"] = "هذه القطعة لا يمكن أن توجد — انظر للمربعات المضيئة";
   d["paint.swapped"] = "العدد صحيح لكن قطعتين متبادلتان";
 
@@ -4897,11 +5030,20 @@ h1, h2, h3 { line-height: 1.25; }
         if (tappedIdx != null && marks.indexOf(tappedIdx) >= 0) RA.sfx("bad");
       }
     }
+    var lockedOrder = [];
     net.onStickerTap(function (idx) {
       if (idx % 9 === 4) return; // centers fixed
       var s = net.state().split("");
       s[idx] = current;
-      net.setState(s.join(""));
+      var pos = lockedOrder.indexOf(idx);
+      if (pos >= 0) lockedOrder.splice(pos, 1);
+      lockedOrder.push(idx);
+      var fit = cube.fitLegalProgressive(s.join(""), lockedOrder);
+      if (fit.kept.length < lockedOrder.length) {
+        ui.toast(RA.t("paint.rebalanced"), 2200);
+        lockedOrder = fit.kept;
+      }
+      net.setState(fit.state);
       RA.sfx("tap");
       refresh(idx);
     });
@@ -4914,13 +5056,14 @@ h1, h2, h3 { line-height: 1.25; }
         class: "btn btn-ghost",
         onclick: function () {
           RA.sfx("tap");
+          lockedOrder = [];
           net.setState(cube.scrambledState(RA.rng((Date.now() % 900000) + 7), 20));
           refresh();
         }
       }, "🎲 " + RA.t("scan.random")),
       h("button", {
         class: "btn btn-ghost",
-        onclick: function () { RA.sfx("tap"); net.setState(cube.SOLVED); refresh(); }
+        onclick: function () { RA.sfx("tap"); lockedOrder = []; net.setState(cube.SOLVED); refresh(); }
       }, "↺ " + RA.t("scan.reset"))));
     wrap.appendChild(h("div", { style: { textAlign: "center" } }, confirmBtn));
     refresh();
@@ -5314,6 +5457,7 @@ h1, h2, h3 { line-height: 1.25; }
     var statusEl = h("div", { class: "say", style: { minHeight: "54px", fontSize: "1rem" } }, RA.t("scan.tapFix"));
     wrap.appendChild(statusEl);
     var current = null, fixed = false;
+    var correctedOrder = [];
     var palRow = h("div", { class: "palette-pop" });
     var palette = RA.cubePalette((p && p.game.skin) || "classic");
     "WYGBRO".split("").forEach(function (c) {
@@ -5323,7 +5467,15 @@ h1, h2, h3 { line-height: 1.25; }
           if (current == null || current % 9 === 4) return;
           var s2 = net.state().split("");
           s2[current] = c;
-          net.setState(s2.join(""));
+          var pos = correctedOrder.indexOf(current);
+          if (pos >= 0) correctedOrder.splice(pos, 1);
+          correctedOrder.push(current);
+          var fit2 = cube.fitLegal(s2.join(""), correctedOrder);
+          if (fit2) {
+            net.setState(fit2);
+          } else {
+            net.setState(s2.join(""));
+          }
           fixed = true;
           RA.sfx("tap");
           refresh();
@@ -5670,6 +5822,8 @@ h1, h2, h3 { line-height: 1.25; }
         RA.clear(dotEls[scan.ORDER[fi2]]);
         faceIdx = fi2;
         stopped = false;
+        reviewing = false;
+        buildControls();
         prompt();
       }
       wrap.appendChild(dots);
@@ -5682,22 +5836,28 @@ h1, h2, h3 { line-height: 1.25; }
       var mirror = RA.CubeView(mirrorBox, { size: 130, palette: (p && p.game.skin) || "classic", orbit: false });
       var orient = { F: [-0.15, 0.18], R: [-1.65, 0.18], B: [Math.PI - 0.15, 0.18], L: [1.45, 0.18], U: [-0.15, 1.35], D: [-0.15, -1.35] };
 
-      var captureBtn = h("button", {
-        class: "btn btn-gold",
-        disabled: true,
-        onclick: function () {
-          if (lastPlausible) { RA.sfx("tap"); lockFace(lastPlausible); }
-        }
-      }, "✓ " + RA.t("scan.capture"));
-      controls.appendChild(captureBtn);
-      controls.appendChild(h("button", {
-        class: "btn btn-ghost",
-        onclick: function () { RA.sfx("tap"); cleanup(); RA.go("scan", s.params); }
-      }, "📷 " + RA.t("scan.photoMode")));
-      controls.appendChild(h("button", {
-        class: "btn btn-ghost",
-        onclick: function () { RA.sfx("tap"); cleanup(); RA.go("scan", Object.assign({}, s.params, { paint: true })); }
-      }, "🎨 " + RA.t("scan.manual")));
+      var captureBtn = null;
+      var reviewing = false;
+      function buildControls() {
+        RA.clear(controls);
+        captureBtn = h("button", {
+          class: "btn btn-gold",
+          disabled: true,
+          onclick: function () {
+            if (lastPlausible) { RA.sfx("tap"); lockFace(lastPlausible); }
+          }
+        }, "✓ " + RA.t("scan.capture"));
+        controls.appendChild(captureBtn);
+        controls.appendChild(h("button", {
+          class: "btn btn-ghost",
+          onclick: function () { RA.sfx("tap"); cleanup(); RA.go("scan", s.params); }
+        }, "📷 " + RA.t("scan.photoMode")));
+        controls.appendChild(h("button", {
+          class: "btn btn-ghost",
+          onclick: function () { RA.sfx("tap"); cleanup(); RA.go("scan", Object.assign({}, s.params, { paint: true })); }
+        }, "🎨 " + RA.t("scan.manual")));
+      }
+      buildControls();
 
       var faces = {};
       var faceIdx = 0;
@@ -5784,7 +5944,7 @@ h1, h2, h3 { line-height: 1.25; }
 
       var cooldownUntil = 0;
       function tick() {
-        if (stopped || Date.now() < cooldownUntil) return;
+        if (stopped || reviewing || Date.now() < cooldownUntil) return;
         var cells = sampleFrame();
         if (!cells) { showChips(null); return; }
         var face = currentFace();
@@ -5821,9 +5981,19 @@ h1, h2, h3 { line-height: 1.25; }
         for (var i = 0; i < scan.ORDER.length; i++) {
           if (!faces[scan.ORDER[i]]) { next = i; break; }
         }
-        if (next < 0) { finish(); return; }
+        if (next < 0) { allCaptured(); return; }
         faceIdx = next;
         prompt();
+      }
+
+      function allCaptured() {
+        reviewing = true;
+        say.textContent = RA.t("scan.reviewAll");
+        RA.clear(controls);
+        controls.appendChild(h("button", {
+          class: "btn btn-gold btn-big",
+          onclick: function () { RA.sfx("good"); finish(); }
+        }, "✓ " + RA.t("ui.continue")));
       }
 
       function finish() {
