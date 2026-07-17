@@ -2413,6 +2413,25 @@ h1, h2, h3 { line-height: 1.25; }
 
   scan.FACE_OF_COLOR = { W: "U", Y: "D", G: "F", B: "B", R: "R", O: "L" };
 
+  scan.mirrorFace = function (colors) {
+    var out = "";
+    for (var i = 0; i < 9; i++) {
+      var r = Math.floor(i / 3), c = i % 3;
+      out += colors[r * 3 + (2 - c)];
+    }
+    return out;
+  };
+
+  scan.resolveAssembly = function (byLetter) {
+    var direct = scan.resolveRotations(byLetter);
+    if (direct) return direct;
+    var mirrored = {};
+    Object.keys(byLetter).forEach(function (L) {
+      mirrored[L] = scan.mirrorFace(byLetter[L]);
+    });
+    return scan.resolveRotations(mirrored);
+  };
+
   scan.quality = function (lumGrid, w, hh) {
     var mean = 0, i;
     for (i = 0; i < lumGrid.length; i++) mean += lumGrid[i];
@@ -5159,6 +5178,14 @@ h1, h2, h3 { line-height: 1.25; }
 
     function fixStep() {
       var res = scan.classify(samples);
+      (function () {
+        var byLetter = {};
+        ["U", "R", "F", "D", "L", "B"].forEach(function (L, i) {
+          byLetter[L] = res.facelets.substr(i * 9, 9);
+        });
+        var resolved = scan.resolveAssembly(byLetter);
+        if (resolved) res.facelets = resolved;
+      })();
       var p2 = RA.profiles.active();
       if (p2) {
         p2.game.scans = (p2.game.scans || 0) + 1;
@@ -5436,7 +5463,7 @@ h1, h2, h3 { line-height: 1.25; }
           photoStep();
           return;
         }
-        var resolved = scan.resolveRotations(byLetter);
+        var resolved = scan.resolveAssembly(byLetter);
         var facelets = resolved || letters.map(function (L) { return byLetter[L]; }).join("");
         RA.scanReview(root, facelets, [], save, function () { photoNo = 1; byLetter = {}; photoStep(); });
       }
@@ -5998,12 +6025,18 @@ h1, h2, h3 { line-height: 1.25; }
 
       function finish() {
         cleanup();
-        var faceIdxMap = { U: 0, R: 1, F: 2, D: 3, L: 4, B: 5 };
-        var arr = new Array(54);
-        Object.keys(faces).forEach(function (f) {
-          for (var i = 0; i < 9; i++) arr[faceIdxMap[f] * 9 + i] = faces[f][i];
-        });
-        var facelets = arr.join("");
+        var resolved = scan.resolveAssembly(faces);
+        var facelets;
+        if (resolved) {
+          facelets = resolved;
+        } else {
+          var faceIdxMap = { U: 0, R: 1, F: 2, D: 3, L: 4, B: 5 };
+          var arr = new Array(54);
+          Object.keys(faces).forEach(function (f) {
+            for (var i = 0; i < 9; i++) arr[faceIdxMap[f] * 9 + i] = faces[f][i];
+          });
+          facelets = arr.join("");
+        }
         var p2 = RA.profiles.active();
         if (p2) {
           p2.game.scans = (p2.game.scans || 0) + 1;
