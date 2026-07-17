@@ -2092,7 +2092,22 @@ h1, h2, h3 { line-height: 1.25; }
     }
     var centerOk = scan.roughCenterColor(center) === expectedCenter ||
       scan.classifyCells([center], centroids).colors === expectedCenter;
-    return { colors: out, conf: minConf, centerOk: centerOk };
+    var maxDist = 0;
+    for (var k = 0; k < 9; k++) {
+      var ck = [0, 1, 2].map(function (ch) {
+        return Math.max(0, Math.min(255, cells[k][ch] * gain[ch]));
+      });
+      var labK = srgb2lab(ck[0], ck[1], ck[2]);
+      var bdK = 1e9;
+      Object.keys(centroids).forEach(function (col) {
+        var cen = centroids[col];
+        var d0 = labK[0] - cen[0], d1 = labK[1] - cen[1], d2b = labK[2] - cen[2];
+        var d = d0 * d0 + d1 * d1 + d2b * d2b;
+        if (d < bdK) bdK = d;
+      });
+      if (bdK > maxDist) maxDist = bdK;
+    }
+    return { colors: out, conf: minConf, centerOk: centerOk, maxDist: Math.sqrt(maxDist) };
   };
 
   scan.findCubeRegion = function (grid, w, hh) {
@@ -5177,28 +5192,95 @@ h1, h2, h3 { line-height: 1.25; }
 
       var stage = h("div", { class: "ar-stage", dir: "ltr" });
       var overlay = hs("svg", { viewBox: "0 0 100 100", class: "ar-overlay" });
+      var frameG = hs("g", null);
       var ring = hs("rect", { x: 15, y: 15, width: 70, height: 70, rx: 6, fill: "none", stroke: "rgba(255,255,255,0.9)", "stroke-width": 2 });
-      overlay.appendChild(ring);
-      [(15 + 70 / 3), (15 + 140 / 3)].forEach(function (v) {
-        overlay.appendChild(hs("line", { x1: v, y1: 15, x2: v, y2: 85, stroke: "rgba(255,255,255,0.55)", "stroke-width": 0.9 }));
-        overlay.appendChild(hs("line", { x1: 15, y1: v, x2: 85, y2: v, stroke: "rgba(255,255,255,0.55)", "stroke-width": 0.9 }));
-      });
+      frameG.appendChild(ring);
+      var gridLines = [];
+      for (var gl = 0; gl < 4; gl++) {
+        var ln = hs("line", { stroke: "rgba(255,255,255,0.55)", "stroke-width": 0.9 });
+        gridLines.push(ln);
+        frameG.appendChild(ln);
+      }
+      var chips = [];
+      for (var ci = 0; ci < 9; ci++) {
+        var chip = hs("rect", { rx: 1.6, fill: "none", stroke: "rgba(0,0,0,0.35)", "stroke-width": 0.6, opacity: 0 });
+        chips.push(chip);
+        frameG.appendChild(chip);
+      }
+      overlay.appendChild(frameG);
       stage.appendChild(overlay);
       var mirrorBox = h("div", { class: "ar-mirror" });
       stage.appendChild(mirrorBox);
       wrap.appendChild(stage);
 
+      var frame = { x: 15, y: 15, side: 70 };
+      function layoutFrame() {
+        ring.setAttribute("x", frame.x); ring.setAttribute("y", frame.y);
+        ring.setAttribute("width", frame.side); ring.setAttribute("height", frame.side);
+        var t1 = frame.side / 3, t2 = 2 * frame.side / 3;
+        gridLines[0].setAttribute("x1", frame.x + t1); gridLines[0].setAttribute("y1", frame.y);
+        gridLines[0].setAttribute("x2", frame.x + t1); gridLines[0].setAttribute("y2", frame.y + frame.side);
+        gridLines[1].setAttribute("x1", frame.x + t2); gridLines[1].setAttribute("y1", frame.y);
+        gridLines[1].setAttribute("x2", frame.x + t2); gridLines[1].setAttribute("y2", frame.y + frame.side);
+        gridLines[2].setAttribute("x1", frame.x); gridLines[2].setAttribute("y1", frame.y + t1);
+        gridLines[2].setAttribute("x2", frame.x + frame.side); gridLines[2].setAttribute("y2", frame.y + t1);
+        gridLines[3].setAttribute("x1", frame.x); gridLines[3].setAttribute("y1", frame.y + t2);
+        gridLines[3].setAttribute("x2", frame.x + frame.side); gridLines[3].setAttribute("y2", frame.y + t2);
+        var cs = frame.side / 3, chipSide = cs * 0.32;
+        for (var i = 0; i < 9; i++) {
+          var r = Math.floor(i / 3), c = i % 3;
+          chips[i].setAttribute("x", frame.x + c * cs + cs * 0.06);
+          chips[i].setAttribute("y", frame.y + r * cs + cs * 0.06);
+          chips[i].setAttribute("width", chipSide);
+          chips[i].setAttribute("height", chipSide);
+        }
+      }
+      layoutFrame();
+      function showChips(colors) {
+        for (var i = 0; i < 9; i++) {
+          if (colors) {
+            chips[i].setAttribute("fill", palette[colors[i]] || "#888");
+            chips[i].setAttribute("opacity", 0.95);
+          } else {
+            chips[i].setAttribute("opacity", 0);
+          }
+        }
+      }
+
       var palette = RA.cubePalette((p && p.game.skin) || "classic");
       var dots = h("div", { style: { display: "flex", gap: "8px", justifyContent: "center" } });
-      scan.ORDER.forEach(function (f) {
-        dots.appendChild(h("div", {
+      var dotEls = {};
+      scan.ORDER.forEach(function (f, fi2) {
+        var d = h("button", {
           id: "lsdot-" + f,
           style: {
-            width: "34px", height: "34px", borderRadius: "10px",
-            background: "rgba(35,57,91,0.15)", border: "3px solid var(--paper)"
+            width: "40px", height: "40px", borderRadius: "10px", padding: "2px",
+            background: "rgba(35,57,91,0.15)", border: "3px solid var(--paper)",
+            display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "1px"
+          },
+          onclick: function () {
+            if (faces[f]) { RA.sfx("tap"); redoFace(fi2); }
           }
-        }));
+        });
+        dotEls[f] = d;
+        dots.appendChild(d);
       });
+      function fillDot(f, colors) {
+        var d = dotEls[f];
+        RA.clear(d);
+        for (var i = 0; i < 9; i++) {
+          d.appendChild(h("div", {
+            style: { background: palette[colors[i]] || "#888", borderRadius: "2px", minHeight: "8px" }
+          }));
+        }
+      }
+      function redoFace(fi2) {
+        faces[scan.ORDER[fi2]] = null;
+        RA.clear(dotEls[scan.ORDER[fi2]]);
+        faceIdx = fi2;
+        stopped = false;
+        prompt();
+      }
       wrap.appendChild(dots);
       var say = h("div", { class: "say" }, "");
       wrap.appendChild(say);
@@ -5235,44 +5317,71 @@ h1, h2, h3 { line-height: 1.25; }
       var sampleCanvas = document.createElement("canvas");
       sampleCanvas.width = 300; sampleCanvas.height = 300;
       var sctx = sampleCanvas.getContext("2d", { willReadFrequently: true });
+      var findCanvas = document.createElement("canvas");
+      findCanvas.width = 96; findCanvas.height = 96;
+      var fctx = findCanvas.getContext("2d", { willReadFrequently: true });
+
+      function trimmedCell(x0, y0, side) {
+        var pad = side * 0.28;
+        var data = sctx.getImageData(Math.round(x0 + pad), Math.round(y0 + pad),
+          Math.max(2, Math.round(side - 2 * pad)), Math.max(2, Math.round(side - 2 * pad))).data;
+        var px = [];
+        for (var i = 0; i < data.length; i += 4) {
+          px.push([data[i], data[i + 1], data[i + 2], data[i] + data[i + 1] + data[i + 2]]);
+        }
+        px.sort(function (a, b) { return a[3] - b[3]; });
+        var lo = Math.floor(px.length * 0.2), hi = Math.ceil(px.length * 0.8);
+        var sum = [0, 0, 0], n = 0;
+        for (var j = lo; j < hi; j++) { sum[0] += px[j][0]; sum[1] += px[j][1]; sum[2] += px[j][2]; n++; }
+        return [sum[0] / n, sum[1] / n, sum[2] / n];
+      }
 
       function sampleFrame() {
         if (!video || video.readyState < 2) return null;
         var vw = video.videoWidth, vh = video.videoHeight;
         if (!vw || !vh) return null;
-        var side = Math.min(vw, vh) * 0.7;
+        var side = Math.min(vw, vh);
         sctx.drawImage(video, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, 300, 300);
+        fctx.drawImage(sampleCanvas, 0, 0, 96, 96);
+        var data = fctx.getImageData(0, 0, 96, 96).data;
+        var grid = new Array(96 * 96 * 3);
+        for (var i = 0, j = 0; i < data.length; i += 4) {
+          grid[j++] = data[i]; grid[j++] = data[i + 1]; grid[j++] = data[i + 2];
+        }
+        var region = scan.findCubeRegion(grid, 96, 96);
+        if (!region) return null;
+        var k = 300 / 96;
+        var rx = region.x * k, ry = region.y * k, rs = region.side * k;
         var cells = [];
+        var cs = rs / 3;
         for (var r = 0; r < 3; r++) {
           for (var c = 0; c < 3; c++) {
-            var data = sctx.getImageData(c * 100 + 30, r * 100 + 30, 40, 40).data;
-            var px = [];
-            for (var i = 0; i < data.length; i += 4) {
-              px.push([data[i], data[i + 1], data[i + 2], data[i] + data[i + 1] + data[i + 2]]);
-            }
-            px.sort(function (a, b) { return a[3] - b[3]; });
-            var lo = Math.floor(px.length * 0.2), hi = Math.ceil(px.length * 0.8);
-            var sum = [0, 0, 0], n = 0;
-            for (var j = lo; j < hi; j++) { sum[0] += px[j][0]; sum[1] += px[j][1]; sum[2] += px[j][2]; n++; }
-            cells.push([sum[0] / n, sum[1] / n, sum[2] / n]);
+            cells.push(trimmedCell(rx + c * cs, ry + r * cs, cs));
           }
         }
+        var tx = region.x / 96 * 100, ty = region.y / 96 * 100, ts = region.side / 96 * 100;
+        frame.x += (tx - frame.x) * 0.45;
+        frame.y += (ty - frame.y) * 0.45;
+        frame.side += (ts - frame.side) * 0.45;
+        layoutFrame();
         return cells;
       }
 
+      var cooldownUntil = 0;
       function tick() {
-        if (stopped) return;
+        if (stopped || Date.now() < cooldownUntil) return;
         var cells = sampleFrame();
-        if (!cells) return;
+        if (!cells) { showChips(null); return; }
         var face = currentFace();
         var res = scan.readFaceLive(cells, scan.EXPECT[face]);
-        var promising = res.centerOk && res.conf > 0.05;
+        showChips(res.centerOk ? res.colors : null);
+        var promising = res.centerOk && res.conf > 0.05 && res.maxDist < 48;
         ring.setAttribute("stroke", promising ? "#35c46f" : "rgba(255,255,255,0.9)");
         ring.setAttribute("stroke-width", promising ? 3.5 : 2);
         if (promising) {
           if (lastRead === res.colors) agree++;
           else { lastRead = res.colors; agree = 1; }
-          if (agree >= 2) lockFace(res.colors);
+          if (agree >= 3) lockFace(res.colors);
         } else {
           agree = 0;
           if (Date.now() - startedAt > 14000) {
@@ -5286,10 +5395,15 @@ h1, h2, h3 { line-height: 1.25; }
         var f = currentFace();
         faces[f] = colors;
         RA.sfx("good");
-        var dot = document.getElementById("lsdot-" + f);
-        if (dot) { dot.style.background = palette[scan.EXPECT[f]]; }
-        faceIdx++;
-        if (faceIdx >= scan.ORDER.length) { finish(); return; }
+        showChips(null);
+        cooldownUntil = Date.now() + 900;
+        fillDot(f, colors);
+        var next = -1;
+        for (var i = 0; i < scan.ORDER.length; i++) {
+          if (!faces[scan.ORDER[i]]) { next = i; break; }
+        }
+        if (next < 0) { finish(); return; }
+        faceIdx = next;
         prompt();
       }
 
