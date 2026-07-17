@@ -1997,6 +1997,20 @@ h1, h2, h3 { line-height: 1.25; }
     B: [40, 80, 160], R: [185, 50, 45], O: [230, 115, 35]
   };
 
+  var HUE_SPLIT_OY = (function () {
+    function hueOf(rgb) {
+      var l = srgb2lab(rgb[0], rgb[1], rgb[2]);
+      return Math.atan2(l[2], l[1]);
+    }
+    return (hueOf(CANON_RGB.O) + hueOf(CANON_RGB.Y)) / 2;
+  })();
+  function warmOY(lab) {
+    var chroma = Math.sqrt(lab[1] * lab[1] + lab[2] * lab[2]);
+    if (chroma < 20) return null; // too pale to trust hue
+    return Math.atan2(lab[2], lab[1]) > HUE_SPLIT_OY ? "Y" : "O";
+  }
+  scan.warmOY = warmOY;
+
   scan.classify = function (samples) {
     var labs = {};   // face -> [lab x9] (corrected)
     scan.ORDER.forEach(function (f) {
@@ -2037,8 +2051,20 @@ h1, h2, h3 { line-height: 1.25; }
         var ranked = COLORS.map(function (col) {
           return { col: col, d: dist2(e.lab, centroids[col]) };
         }).sort(function (a, b) { return a.d - b.d; });
+        if (ranked[0].col === "O" || ranked[0].col === "Y") {
+          var hc = warmOY(e.lab);
+          if (hc && hc !== ranked[0].col) {
+            for (var hi = 1; hi < ranked.length; hi++) {
+              if (ranked[hi].col === hc) {
+                var moved = ranked.splice(hi, 1)[0];
+                ranked.unshift(moved);
+                break;
+              }
+            }
+          }
+        }
         e.color = ranked[0].col;
-        e.conf = (ranked[1].d - ranked[0].d) / (ranked[1].d + ranked[0].d + 1e-6);
+        e.conf = Math.abs(ranked[1].d - ranked[0].d) / (ranked[1].d + ranked[0].d + 1e-6);
         e.ranked = ranked;
       });
     }
@@ -2197,7 +2223,12 @@ h1, h2, h3 { line-height: 1.25; }
         var d = dist2(lab, centroids[col]);
         if (!best || d < best.d) best = { col: col, d: d };
       });
-      out += best.col;
+      var col2 = best.col;
+      if (col2 === "O" || col2 === "Y") {
+        var hc = warmOY(lab);
+        if (hc) col2 = hc;
+      }
+      out += col2;
     }
     return { colors: out, count: scan.matchCount(out, expected) };
   };
@@ -2218,19 +2249,27 @@ h1, h2, h3 { line-height: 1.25; }
       return cs.map(function (c) {
         var lab = srgb2lab(c[0], c[1], c[2]);
         var best = null, second = null, bestFull = 1e9;
+        var dists = {};
         Object.keys(centroids).forEach(function (col) {
           var cen = centroids[col];
           var d = dist2(lab, cen);
+          dists[col] = d;
           var d0 = lab[0] - cen[0], d1 = lab[1] - cen[1], d2b = lab[2] - cen[2];
           var dF = d0 * d0 + d1 * d1 + d2b * d2b;
           if (dF < bestFull) bestFull = dF;
           if (!best || d < best.d) { second = best; best = { col: col, d: d }; }
           else if (!second || d < second.d) second = { col: col, d: d };
         });
+        var col = best.col;
+        if (col === "O" || col === "Y") {
+          var hc = warmOY(lab);
+          if (hc) col = hc;
+        }
         return {
-          col: best.col,
+          col: col,
           conf: second ? (second.d - best.d) / (second.d + best.d + 1e-6) : 1,
-          fullDist: Math.sqrt(bestFull)
+          fullDist: Math.sqrt(bestFull),
+          dists: dists
         };
       });
     }
@@ -2244,7 +2283,8 @@ h1, h2, h3 { line-height: 1.25; }
         var col = (i === 4) ? expectedCenter : r.col;
         var canonC = CANON_RGB[col];
         for (var ch = 0; ch < 3; ch++) {
-          if (canonC[ch] < 60 || finalCells[i][ch] < 30) continue;
+          if (canonC[ch] < 70 || finalCells[i][ch] < 30) continue;
+          if (ch === 1 && (col === "O" || col === "Y")) continue;
           ratioSum[ch] += canonC[ch] / finalCells[i][ch];
           ratioN[ch]++;
         }
@@ -2261,14 +2301,60 @@ h1, h2, h3 { line-height: 1.25; }
     }
 
     var out = "", minConf = 1, maxDist = 0;
+    var detail = [];
     read.forEach(function (r, i) {
-      out += (i === 4) ? expectedCenter : r.col;
+      var col = (i === 4) ? expectedCenter : r.col;
+      out += col;
+      detail.push({ col: col, conf: r.conf, dists: r.dists });
       if (i !== 4 && r.conf < minConf) minConf = r.conf;
       if (r.fullDist > maxDist) maxDist = r.fullDist;
     });
     var centerOk = scan.roughCenterColor(center) === expectedCenter ||
       scan.classifyCells([center], centroids).colors === expectedCenter;
-    return { colors: out, conf: minConf, centerOk: centerOk, maxDist: maxDist };
+    return { colors: out, conf: minConf, centerOk: centerOk, maxDist: maxDist, detail: detail };
+  };
+
+  scan.repairFaces = function (byLetter, detailByLetter) {
+    var COLORS = ["W", "Y", "G", "B", "R", "O"];
+    var letters = Object.keys(byLetter);
+    var entries = [];
+    letters.forEach(function (L) {
+      var det = detailByLetter && detailByLetter[L];
+      for (var i = 0; i < 9; i++) {
+        entries.push({
+          face: L, cell: i, color: byLetter[L][i],
+          dists: (i !== 4 && det && det[i]) ? det[i].dists : null
+        });
+      }
+    });
+    var changed = false;
+    for (var iter = 0; iter < 30; iter++) {
+      var counts = {};
+      entries.forEach(function (e) { counts[e.color] = (counts[e.color] || 0) + 1; });
+      var over = null;
+      COLORS.forEach(function (col) {
+        var n = counts[col] || 0;
+        if (n > 9 && (!over || n > counts[over])) over = col;
+      });
+      if (!over) break;
+      var best = null;
+      entries.forEach(function (e) {
+        if (e.color !== over || e.cell === 4 || !e.dists) return;
+        COLORS.forEach(function (col) {
+          if ((counts[col] || 0) >= 9) return;
+          var cost = e.dists[col] - e.dists[e.color];
+          if (!best || cost < best.cost) best = { e: e, col: col, cost: cost };
+        });
+      });
+      if (!best) break;
+      best.e.color = best.col;
+      changed = true;
+    }
+    if (!changed) return null;
+    var out = {};
+    letters.forEach(function (L) { out[L] = ""; });
+    entries.forEach(function (e) { out[e.face] += e.color; });
+    return out;
   };
 
   scan.findCubeRegion = function (grid, w, hh, opts) {
@@ -5346,6 +5432,7 @@ h1, h2, h3 { line-height: 1.25; }
       var onDone = s.params.onDone || function () { RA.go("map"); };
       var onCancel = s.params.onCancel || function () { RA.go("map"); };
       var byLetter = {};
+      var byLetterDetail = {};
       var photoNo = 1;
 
       function save(facelets) {
@@ -5447,7 +5534,7 @@ h1, h2, h3 { line-height: 1.25; }
               var cells = sampleQuadCells(ctx2d, quads[q]);
               var centerColor = scan.roughCenterColor(cells[4]);
               var read = scan.readFaceLive(cells, centerColor);
-              got.push({ color: centerColor, cells: read.colors });
+              got.push({ color: centerColor, cells: read.colors, detail: read.detail });
             }
             var colors = got.map(function (g2) { return g2.color; });
             if (new Set(colors).size !== 3) {
@@ -5456,6 +5543,7 @@ h1, h2, h3 { line-height: 1.25; }
             }
             got.forEach(function (g2) {
               byLetter[scan.FACE_OF_COLOR[g2.color]] = g2.cells;
+              byLetterDetail[scan.FACE_OF_COLOR[g2.color]] = g2.detail;
             });
             if (photoNo === 1) {
               photoNo = 2;
@@ -5490,8 +5578,12 @@ h1, h2, h3 { line-height: 1.25; }
           return;
         }
         var resolved = scan.resolveAssembly(byLetter);
+        if (!resolved) {
+          var repaired = scan.repairFaces(byLetter, byLetterDetail);
+          if (repaired) resolved = scan.resolveAssembly(repaired);
+        }
         var facelets = resolved || letters.map(function (L) { return byLetter[L]; }).join("");
-        RA.scanReview(root, facelets, [], save, function () { photoNo = 1; byLetter = {}; photoStep(); });
+        RA.scanReview(root, facelets, [], save, function () { photoNo = 1; byLetter = {}; byLetterDetail = {}; photoStep(); });
       }
 
       photoStep();
@@ -5872,6 +5964,7 @@ h1, h2, h3 { line-height: 1.25; }
       }
       function redoFace(fi2) {
         faces[scan.ORDER[fi2]] = null;
+        facesDetail[scan.ORDER[fi2]] = null;
         RA.clear(dotEls[scan.ORDER[fi2]]);
         faceIdx = fi2;
         stopped = false;
@@ -5897,7 +5990,7 @@ h1, h2, h3 { line-height: 1.25; }
           class: "btn btn-gold",
           disabled: true,
           onclick: function () {
-            if (lastPlausible) { RA.sfx("tap"); lockFace(lastPlausible); }
+            if (lastPlausible) { RA.sfx("tap"); lockFace(lastPlausible, lastPlausibleDetail); }
           }
         }, "✓ " + RA.t("scan.capture"));
         controls.appendChild(captureBtn);
@@ -5913,9 +6006,11 @@ h1, h2, h3 { line-height: 1.25; }
       buildControls();
 
       var faces = {};
+      var facesDetail = {}; // per-face per-cell distances (for count repair)
       var faceIdx = 0;
       var lastRead = null, agree = 0;
       var lastPlausible = null; // latest centerOk reading (for manual capture)
+      var lastPlausibleDetail = null;
       var startedAt = Date.now();
 
       function currentFace() { return scan.ORDER[faceIdx]; }
@@ -6005,6 +6100,7 @@ h1, h2, h3 { line-height: 1.25; }
         showChips(res.centerOk ? res.colors : null);
         if (res.centerOk) {
           lastPlausible = res.colors;
+          lastPlausibleDetail = res.detail;
           captureBtn.disabled = false;
         }
         var promising = res.centerOk && res.conf > 0.05 && res.maxDist < 48;
@@ -6013,7 +6109,7 @@ h1, h2, h3 { line-height: 1.25; }
         if (promising) {
           if (lastRead === res.colors) agree++;
           else { lastRead = res.colors; agree = 1; }
-          if (agree >= 3) lockFace(res.colors);
+          if (agree >= 3) lockFace(res.colors, res.detail);
         } else {
           agree = 0;
           if (Date.now() - startedAt > 14000) {
@@ -6023,9 +6119,10 @@ h1, h2, h3 { line-height: 1.25; }
         }
       }
 
-      function lockFace(colors) {
+      function lockFace(colors, detail) {
         var f = currentFace();
         faces[f] = colors;
+        facesDetail[f] = detail || null;
         RA.sfx("good");
         showChips(null);
         cooldownUntil = Date.now() + 900;
@@ -6052,6 +6149,10 @@ h1, h2, h3 { line-height: 1.25; }
       function finish() {
         cleanup();
         var resolved = scan.resolveAssembly(faces);
+        if (!resolved) {
+          var repaired = scan.repairFaces(faces, facesDetail);
+          if (repaired) resolved = scan.resolveAssembly(repaired);
+        }
         var facelets;
         if (resolved) {
           facelets = resolved;
