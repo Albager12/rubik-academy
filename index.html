@@ -2110,50 +2110,114 @@ h1, h2, h3 { line-height: 1.25; }
     return { colors: out, conf: minConf, centerOk: centerOk, maxDist: Math.sqrt(maxDist) };
   };
 
-  scan.findCubeRegion = function (grid, w, hh) {
-    function cellMean(x0, y0, side) {
-      var cells = [];
+  scan.findCubeRegion = function (grid, w, hh, opts) {
+    opts = opts || {};
+    var centroids = scan.canonCentroids();
+    var colorKeys = Object.keys(centroids);
+
+    var xsList = [], ysList = [];
+    for (var y = 0; y < hh; y += 2) {
+      for (var x = 0; x < w; x += 2) {
+        var o = (y * w + x) * 3;
+        var lab = srgb2lab(grid[o], grid[o + 1], grid[o + 2]);
+        var bd = 1e9, bc = null;
+        for (var ci = 0; ci < colorKeys.length; ci++) {
+          var cen = centroids[colorKeys[ci]];
+          var d0 = lab[0] - cen[0], d1 = lab[1] - cen[1], d2v = lab[2] - cen[2];
+          var d = d0 * d0 + d1 * d1 + d2v * d2v;
+          if (d < bd) { bd = d; bc = colorKeys[ci]; }
+        }
+        if (bd < 38 * 38 && lab[0] > 24 && bc !== "W") { xsList.push(x); ysList.push(y); }
+      }
+    }
+    var bbox = null;
+    if (xsList.length >= 10) {
+      xsList.sort(function (a, b) { return a - b; });
+      ysList.sort(function (a, b) { return a - b; });
+      var lo = Math.floor(xsList.length * 0.05), hi2 = Math.ceil(xsList.length * 0.95) - 1;
+      bbox = { x0: xsList[lo], x1: xsList[hi2], y0: ysList[lo], y1: ysList[hi2] };
+    }
+
+    function cellStats(x0, y0, side) {
+      var cells = [], vars = [];
       var cs = side / 3;
       for (var r = 0; r < 3; r++) {
         for (var c = 0; c < 3; c++) {
-          var sum = [0, 0, 0], n = 0;
+          var sum = [0, 0, 0], sq = [0, 0, 0], n = 0;
           var xa = Math.round(x0 + c * cs + cs * 0.3), xb = Math.round(x0 + c * cs + cs * 0.7);
           var ya = Math.round(y0 + r * cs + cs * 0.3), yb = Math.round(y0 + r * cs + cs * 0.7);
-          for (var y = ya; y < yb; y++) {
-            for (var x = xa; x < xb; x++) {
-              var o = (y * w + x) * 3;
-              sum[0] += grid[o]; sum[1] += grid[o + 1]; sum[2] += grid[o + 2]; n++;
+          for (var yy = ya; yy < yb; yy++) {
+            for (var xx = xa; xx < xb; xx++) {
+              var oo = (yy * w + xx) * 3;
+              for (var ch = 0; ch < 3; ch++) {
+                sum[ch] += grid[oo + ch];
+                sq[ch] += grid[oo + ch] * grid[oo + ch];
+              }
+              n++;
             }
           }
-          cells.push(n ? [sum[0] / n, sum[1] / n, sum[2] / n] : [0, 0, 0]);
+          if (!n) { cells.push([0, 0, 0]); vars.push(999); continue; }
+          var mean = [sum[0] / n, sum[1] / n, sum[2] / n];
+          var v = 0;
+          for (var ch2 = 0; ch2 < 3; ch2++) v += sq[ch2] / n - mean[ch2] * mean[ch2];
+          cells.push(mean);
+          vars.push(Math.sqrt(Math.max(0, v / 3)));
         }
       }
-      return cells;
+      return { cells: cells, vars: vars };
     }
-    var centroids = scan.canonCentroids();
+
     var best = null;
-    var minSide = Math.floor(Math.min(w, hh) * 0.28);
-    var maxSide = Math.floor(Math.min(w, hh) * 0.96);
-    for (var side = minSide; side <= maxSide; side = Math.max(side + 4, Math.floor(side * 1.18))) {
-      var step = Math.max(3, Math.floor(side * 0.12));
-      for (var y0 = 0; y0 + side <= hh; y0 += step) {
-        for (var x0 = 0; x0 + side <= w; x0 += step) {
-          var cells = scan.normalizeCells(cellMean(x0, y0, side));
-          var score = 0;
-          var seen = {};
-          for (var i = 0; i < 9; i++) {
-            var lab = srgb2lab(cells[i][0], cells[i][1], cells[i][2]);
-            var bd = 1e9, bc = null;
-            Object.keys(centroids).forEach(function (col) {
-              var d = dist2(lab, centroids[col]);
-              if (d < bd) { bd = d; bc = col; }
-            });
-            score -= Math.sqrt(bd);
-            seen[bc] = 1;
-          }
-          score += Object.keys(seen).length * 11;
-          score += side * 0.15;
-          if (!best || score > best.score) best = { x: x0, y: y0, side: side, score: score };
+    function consider(x0, y0, side) {
+      x0 = Math.round(x0); y0 = Math.round(y0); side = Math.round(side);
+      if (x0 < 0 || y0 < 0 || side < 10 || x0 + side > w || y0 + side > hh) return;
+      if (opts.anchor) {
+        if (opts.anchor[0] < x0 || opts.anchor[0] > x0 + side ||
+            opts.anchor[1] < y0 || opts.anchor[1] > y0 + side) return;
+      }
+      var st = cellStats(x0, y0, side);
+      var score = 0, seen = {}, badCells = 0, varSum = 0;
+      for (var i = 0; i < 9; i++) {
+        var lab = srgb2lab(st.cells[i][0], st.cells[i][1], st.cells[i][2]);
+        var bd = 1e9, bdFull = 1e9, bc = null;
+        for (var ci2 = 0; ci2 < colorKeys.length; ci2++) {
+          var cen = centroids[colorKeys[ci2]];
+          var dW = dist2(lab, cen);
+          var d0 = lab[0] - cen[0], d1 = lab[1] - cen[1], d2v = lab[2] - cen[2];
+          var dF = d0 * d0 + d1 * d1 + d2v * d2v;
+          if (dW < bd) { bd = dW; bc = colorKeys[ci2]; }
+          if (dF < bdFull) bdFull = dF;
+        }
+        score -= Math.sqrt(bd);
+        varSum += st.vars[i];
+        seen[bc] = 1;
+        if (Math.sqrt(bdFull) > 48) badCells++;
+      }
+      if (badCells > 1) return; // background inside the window
+      score -= varSum * 0.55;   // misaligned cells straddle stickers
+      score += Object.keys(seen).length * 8;
+      if (!best || score > best.score) best = { x: x0, y: y0, side: side, score: score };
+    }
+
+    if (bbox) {
+      var base = Math.max(bbox.x1 - bbox.x0, bbox.y1 - bbox.y0, 12);
+      for (var sf = 1.0; sf <= 2.45; sf *= 1.16) {
+        var side = Math.min(Math.min(w, hh), Math.round(base * sf));
+        var step = Math.max(2, Math.round(side * 0.07));
+        var yA = Math.max(0, bbox.y1 - side), yB = Math.min(bbox.y0, hh - side);
+        var xA = Math.max(0, bbox.x1 - side), xB = Math.min(bbox.x0, w - side);
+        if (yB < yA) yB = yA;
+        if (xB < xA) xB = xA;
+        for (var y0c = yA; y0c <= yB; y0c += step) {
+          for (var x0c = xA; x0c <= xB; x0c += step) consider(x0c, y0c, side);
+        }
+      }
+    } else {
+      var minSide = Math.floor(Math.min(w, hh) * 0.3);
+      for (var side2 = minSide; side2 <= Math.min(w, hh); side2 = Math.floor(side2 * 1.25)) {
+        var step2 = Math.max(3, Math.floor(side2 * 0.14));
+        for (var yy0 = 0; yy0 + side2 <= hh; yy0 += step2) {
+          for (var xx0 = 0; xx0 + side2 <= w; xx0 += step2) consider(xx0, yy0, side2);
         }
       }
     }
@@ -2515,7 +2579,7 @@ h1, h2, h3 { line-height: 1.25; }
   d["scan.random"] = "Surprise mix";
   d["scan.reset"] = "All done cube";
   d["scan.photoMode"] = "Photos instead";
-  d["scan.liveTip"] = "Fill the frame with one side, near a window";
+  d["scan.liveTip"] = "Bring it closer, or tap the cube on the screen";
 
   d["ar.title"] = "Magic Camera";
   d["ar.pickTarget"] = "What shall we finish today?";
@@ -2848,7 +2912,7 @@ h1, h2, h3 { line-height: 1.25; }
   d["scan.random"] = "خلطة مفاجأة";
   d["scan.reset"] = "مكعب مرتب";
   d["scan.photoMode"] = "صور بدلًا";
-  d["scan.liveTip"] = "املأ الإطار بوجه واحد، قرب النافذة";
+  d["scan.liveTip"] = "قرّبه أكثر، أو المس المكعب على الشاشة";
 
   d["ar.title"] = "الكاميرا السحرية";
   d["ar.pickTarget"] = "ماذا سنُنجز اليوم؟";
@@ -5321,6 +5385,17 @@ h1, h2, h3 { line-height: 1.25; }
       findCanvas.width = 96; findCanvas.height = 96;
       var fctx = findCanvas.getContext("2d", { willReadFrequently: true });
 
+      var tapAnchor = null;
+      stage.addEventListener("pointerdown", function (ev) {
+        var r = stage.getBoundingClientRect();
+        var side = Math.min(r.width, r.height);
+        var x = (ev.clientX - r.left - (r.width - side) / 2) / side;
+        var y = (ev.clientY - r.top - (r.height - side) / 2) / side;
+        if (x < 0 || x > 1 || y < 0 || y > 1) return;
+        tapAnchor = { x: x * 96, y: y * 96, until: Date.now() + 6000 };
+        RA.sfx("tap");
+      });
+
       function trimmedCell(x0, y0, side) {
         var pad = side * 0.28;
         var data = sctx.getImageData(Math.round(x0 + pad), Math.round(y0 + pad),
@@ -5348,7 +5423,9 @@ h1, h2, h3 { line-height: 1.25; }
         for (var i = 0, j = 0; i < data.length; i += 4) {
           grid[j++] = data[i]; grid[j++] = data[i + 1]; grid[j++] = data[i + 2];
         }
-        var region = scan.findCubeRegion(grid, 96, 96);
+        var opts = (tapAnchor && Date.now() < tapAnchor.until)
+          ? { anchor: [tapAnchor.x, tapAnchor.y] } : undefined;
+        var region = scan.findCubeRegion(grid, 96, 96, opts);
         if (!region) return null;
         var k = 300 / 96;
         var rx = region.x * k, ry = region.y * k, rs = region.side * k;
