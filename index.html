@@ -6079,8 +6079,33 @@ h1, h2, h3 { line-height: 1.25; }
         }, function () { RA.go("livescan", s.params); });
       }
 
+      async function openStreamLS() {
+        if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 1280 } },
+          audio: false
+        });
+        if (!video) {
+          video = h("video", { autoplay: true, muted: true, class: "ar-video" });
+          video.setAttribute("playsinline", "");
+          stage.insertBefore(video, overlay);
+        }
+        video.srcObject = stream;
+        await video.play();
+      }
+      var onVisibleLS = async function () {
+        if (document.hidden || stopped) return;
+        var dead = !stream || stream.getVideoTracks().every(function (t) { return t.readyState !== "live"; });
+        try {
+          if (dead) await openStreamLS();
+          else if (video && video.paused) await video.play();
+        } catch (e) {}
+      };
+      document.addEventListener("visibilitychange", onVisibleLS);
+
       function cleanup() {
         stopped = true;
+        document.removeEventListener("visibilitychange", onVisibleLS);
         if (timer) clearInterval(timer);
         if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
       }
@@ -6088,15 +6113,7 @@ h1, h2, h3 { line-height: 1.25; }
 
       (async function () {
         try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 1280 } },
-            audio: false
-          });
-          video = h("video", { autoplay: true, muted: true, class: "ar-video" });
-          video.setAttribute("playsinline", "");
-          video.srcObject = stream;
-          stage.insertBefore(video, overlay);
-          await video.play();
+          await openStreamLS();
           prompt();
           timer = setInterval(tick, 220);
         } catch (e) {
@@ -6261,11 +6278,40 @@ h1, h2, h3 { line-height: 1.25; }
       overlay.appendChild(arrowG);
       var statusRing = hs("rect", { x: 15, y: 15, width: 70, height: 70, rx: 6, fill: "none", stroke: "rgba(255,255,255,0.9)", "stroke-width": 1.6 });
       frameG.appendChild(statusRing);
-      [(15 + 70 / 3), (15 + 140 / 3)].forEach(function (v) {
-        frameG.appendChild(hs("line", { x1: v, y1: 15, x2: v, y2: 85, stroke: "rgba(255,255,255,0.55)", "stroke-width": 0.9 }));
-        frameG.appendChild(hs("line", { x1: 15, y1: v, x2: 85, y2: v, stroke: "rgba(255,255,255,0.55)", "stroke-width": 0.9 }));
-      });
+      var gridLines = [];
+      for (var gl2 = 0; gl2 < 4; gl2++) {
+        var ln2 = hs("line", { stroke: "rgba(255,255,255,0.55)", "stroke-width": 0.9 });
+        gridLines.push(ln2);
+        frameG.appendChild(ln2);
+      }
+      var frame = { x: 15, y: 15, side: 70 };
+      function layoutFrame() {
+        statusRing.setAttribute("x", frame.x); statusRing.setAttribute("y", frame.y);
+        statusRing.setAttribute("width", frame.side); statusRing.setAttribute("height", frame.side);
+        var t1 = frame.side / 3, t2 = 2 * frame.side / 3;
+        gridLines[0].setAttribute("x1", frame.x + t1); gridLines[0].setAttribute("y1", frame.y);
+        gridLines[0].setAttribute("x2", frame.x + t1); gridLines[0].setAttribute("y2", frame.y + frame.side);
+        gridLines[1].setAttribute("x1", frame.x + t2); gridLines[1].setAttribute("y1", frame.y);
+        gridLines[1].setAttribute("x2", frame.x + t2); gridLines[1].setAttribute("y2", frame.y + frame.side);
+        gridLines[2].setAttribute("x1", frame.x); gridLines[2].setAttribute("y1", frame.y + t1);
+        gridLines[2].setAttribute("x2", frame.x + frame.side); gridLines[2].setAttribute("y2", frame.y + t1);
+        gridLines[3].setAttribute("x1", frame.x); gridLines[3].setAttribute("y1", frame.y + t2);
+        gridLines[3].setAttribute("x2", frame.x + frame.side); gridLines[3].setAttribute("y2", frame.y + t2);
+        var sc = frame.side / 70;
+        arrowG.setAttribute("transform",
+          "translate(" + frame.x + " " + frame.y + ") scale(" + sc + ") translate(-15 -15)");
+      }
+      layoutFrame();
       stage.appendChild(overlay);
+      var tapAnchor = null;
+      stage.addEventListener("pointerdown", function (ev) {
+        var r = stage.getBoundingClientRect();
+        var side = Math.min(r.width, r.height);
+        var x = (ev.clientX - r.left - (r.width - side) / 2) / side;
+        var y = (ev.clientY - r.top - (r.height - side) / 2) / side;
+        if (x < 0 || x > 1 || y < 0 || y > 1) return;
+        tapAnchor = { x: x * 96, y: y * 96, until: Date.now() + 6000 };
+      });
       var mirrorBox = h("div", { class: "ar-mirror" });
       stage.appendChild(mirrorBox);
       wrap.appendChild(stage);
@@ -6298,30 +6344,56 @@ h1, h2, h3 { line-height: 1.25; }
       var centroids = scan.canonCentroids();
       var hasCamera = false;
 
+      var findCanvas2 = document.createElement("canvas");
+      findCanvas2.width = 96; findCanvas2.height = 96;
+      var fctx2 = findCanvas2.getContext("2d", { willReadFrequently: true });
+
+      function trimmedCell2(x0, y0, side) {
+        var pad = side * 0.28;
+        var data = sctx.getImageData(Math.round(x0 + pad), Math.round(y0 + pad),
+          Math.max(2, Math.round(side - 2 * pad)), Math.max(2, Math.round(side - 2 * pad))).data;
+        var px = [];
+        for (var i = 0; i < data.length; i += 4) {
+          px.push([data[i], data[i + 1], data[i + 2], data[i] + data[i + 1] + data[i + 2]]);
+        }
+        px.sort(function (a, b) { return a[3] - b[3]; });
+        var lo = Math.floor(px.length * 0.2), hi = Math.ceil(px.length * 0.8);
+        var sum = [0, 0, 0], n = 0;
+        for (var j = lo; j < hi; j++) { sum[0] += px[j][0]; sum[1] += px[j][1]; sum[2] += px[j][2]; n++; }
+        return [sum[0] / n, sum[1] / n, sum[2] / n];
+      }
+
       function sampleFrame() {
         if (!video || video.readyState < 2) return null;
         var vw = video.videoWidth, vh = video.videoHeight;
         if (!vw || !vh) return null;
-        var side = Math.min(vw, vh) * 0.7; // matches the 70% overlay frame
-        var sx = (vw - side) / 2, sy = (vh - side) / 2;
-        sctx.drawImage(video, sx, sy, side, side, 0, 0, 300, 300);
+        var side = Math.min(vw, vh);
+        sctx.drawImage(video, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, 300, 300);
+        fctx2.drawImage(sampleCanvas, 0, 0, 96, 96);
+        var data = fctx2.getImageData(0, 0, 96, 96).data;
+        var grid = new Array(96 * 96 * 3);
+        for (var i = 0, j = 0; i < data.length; i += 4) {
+          grid[j++] = data[i]; grid[j++] = data[i + 1]; grid[j++] = data[i + 2];
+        }
+        var opts = (tapAnchor && Date.now() < tapAnchor.until)
+          ? { anchor: [tapAnchor.x, tapAnchor.y] } : undefined;
+        var region = scan.findCubeRegion(grid, 96, 96, opts);
+        if (!region) return null;
+        var k = 300 / 96;
+        var rx = region.x * k, ry = region.y * k, rs = region.side * k;
         var cells = [];
+        var cs = rs / 3;
         for (var r = 0; r < 3; r++) {
           for (var c = 0; c < 3; c++) {
-            var cx = c * 100, cy = r * 100;
-            var data = sctx.getImageData(cx + 30, cy + 30, 40, 40).data;
-            var px = [];
-            for (var i = 0; i < data.length; i += 4) {
-              px.push([data[i], data[i + 1], data[i + 2], data[i] + data[i + 1] + data[i + 2]]);
-            }
-            px.sort(function (a, b) { return a[3] - b[3]; });
-            var lo = Math.floor(px.length * 0.2), hi = Math.ceil(px.length * 0.8);
-            var sum = [0, 0, 0], n = 0;
-            for (var j = lo; j < hi; j++) { sum[0] += px[j][0]; sum[1] += px[j][1]; sum[2] += px[j][2]; n++; }
-            cells.push([sum[0] / n, sum[1] / n, sum[2] / n]);
+            cells.push(trimmedCell2(rx + c * cs, ry + r * cs, cs));
           }
         }
-        return scan.normalizeCells(cells);
+        var tx = region.x / 96 * 100, ty = region.y / 96 * 100, ts = region.side / 96 * 100;
+        frame.x += (tx - frame.x) * 0.45;
+        frame.y += (ty - frame.y) * 0.45;
+        frame.side += (ts - frame.side) * 0.45;
+        layoutFrame();
+        return cells;
       }
 
       var watcher = null;
@@ -6353,17 +6425,42 @@ h1, h2, h3 { line-height: 1.25; }
         return st.substr(cube.idx("F", 0, 0), 9);
       }
 
-      async function initCamera() {
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 1280 } },
-            audio: false
-          });
+      var animToken = null;
+      function loopMirror(before, moves) {
+        var token = {};
+        animToken = token;
+        (async function () {
+          while (animToken === token && !stopped) {
+            mirror.setState(before);
+            mirror.arrow(moves[0]);
+            try { await mirror.animate(moves, { speedMs: 750, sfx: false }); } catch (e) {}
+            await new Promise(function (r) { setTimeout(r, 600); });
+          }
+        })();
+        return function (after) {
+          if (animToken === token) animToken = null;
+          mirror.arrow(null);
+          if (after) mirror.setState(after);
+        };
+      }
+
+      async function openStream() {
+        if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 1280 } },
+          audio: false
+        });
+        if (!video) {
           video = h("video", { autoplay: true, playsinline: true, muted: true, class: "ar-video" });
           video.setAttribute("playsinline", "");
-          video.srcObject = stream;
           stage.insertBefore(video, overlay);
-          await video.play();
+        }
+        video.srcObject = stream;
+        await video.play();
+      }
+      async function initCamera() {
+        try {
+          await openStream();
           hasCamera = true;
           sampleTimer = setInterval(tick, 260);
         } catch (e) {
@@ -6374,8 +6471,19 @@ h1, h2, h3 { line-height: 1.25; }
         }
       }
 
+      var onVisible = async function () {
+        if (document.hidden || stopped || !hasCamera) return;
+        var dead = !stream || stream.getVideoTracks().every(function (t) { return t.readyState !== "live"; });
+        try {
+          if (dead) await openStream();
+          else if (video && video.paused) await video.play();
+        } catch (e) {}
+      };
+      document.addEventListener("visibilitychange", onVisible);
+
       function cleanup() {
         stopped = true;
+        document.removeEventListener("visibilitychange", onVisible);
         if (sampleTimer) clearInterval(sampleTimer);
         if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
       }
@@ -6388,10 +6496,11 @@ h1, h2, h3 { line-height: 1.25; }
           if (rot.length) {
             setSay(RA.t("mission.flipYellow"));
             drawArrow(arrowG, arrowSpec(rot[0]));
-            await mirror.animate(rot, { speedMs: 800 });
-            state = cube.apply(state, rot);
-            mirror.setState(state);
-            await manualOrDetect(state);
+            var afterRot = cube.apply(state, rot);
+            var stopRotLoop = loopMirror(state, rot);
+            await manualOrDetect(afterRot);
+            stopRotLoop(afterRot);
+            state = afterRot;
           }
           var guard = 0;
           while (!stopped && solver.detectStage(state) < gate && guard++ < 90) {
@@ -6412,12 +6521,10 @@ h1, h2, h3 { line-height: 1.25; }
               var mv = step.moves[i];
               setSay(RA.t(isGrip(mv) ? "ar.rotate" : "ar.doMove") + "  (" + RA.fmtNum(i + 1) + "/" + RA.fmtNum(step.moves.length) + ")");
               drawArrow(arrowG, arrowSpec(mv));
-              mirror.arrow(mv);
-              mirror.animate(mv, { speedMs: 700 });
               var after = cube.apply(state, mv);
+              var stopLoop = loopMirror(state, [mv]);
               await manualOrDetect(after, state);
-              mirror.arrow(null);
-              mirror.setState(after);
+              stopLoop(after);
               state = after;
             }
             RA.clear(arrowG);
