@@ -490,6 +490,7 @@ h1, h2, h3 { line-height: 1.25; }
 (function () {
   var g = (typeof window !== "undefined") ? window : globalThis;
   var RA = g.RA = g.RA || {};
+  RA.BUILD = "v2.1"; // bump on every deploy — dev screen shows it (cache check)
 
   var handlers = {};
   RA.bus = {
@@ -2011,6 +2012,61 @@ h1, h2, h3 { line-height: 1.25; }
   }
   scan.warmOY = warmOY;
 
+  function GRr(rgb) { return rgb[1] / Math.max(8, rgb[0]); }
+  function BRr(rgb) { return rgb[2] / Math.max(8, rgb[0]); }
+  var SPLIT_RO = Math.sqrt(GRr(CANON_RGB.R) * GRr(CANON_RGB.O)); // ~0.37
+  var SPLIT_OY = Math.sqrt(GRr(CANON_RGB.O) * GRr(CANON_RGB.Y)); // ~0.65
+  var SPLIT_WY = Math.sqrt(BRr(CANON_RGB.W) * BRr(CANON_RGB.Y)); // ~0.49
+  function castFactors(cells, colors, expectedCenter) {
+    var gr = [], br = [];
+    for (var i = 0; i < 9; i++) {
+      var col = (i === 4) ? expectedCenter : colors[i];
+      if (i !== 4 && col !== "W") continue;
+      var canonC = CANON_RGB[col];
+      if (!canonC || cells[i][0] < 30 || canonC[0] < 100) continue;
+      var w = (i === 4) ? 2 : 1;
+      for (var k = 0; k < w; k++) {
+        gr.push(GRr(cells[i]) / GRr(canonC));
+        br.push(BRr(cells[i]) / BRr(canonC));
+      }
+    }
+    function med(a) {
+      if (!a.length) return 1;
+      a.sort(function (x, y) { return x - y; });
+      var m = a.length >> 1;
+      return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+    }
+    return [
+      Math.max(0.65, Math.min(1.5, med(gr))),
+      Math.max(0.65, Math.min(1.5, med(br)))
+    ];
+  }
+  var MARGIN = 1.1;
+  function refineFamilyColor(rgb, cast, col) {
+    if (col !== "R" && col !== "O" && col !== "Y" && col !== "W") return col;
+    if (rgb[0] < 50) return col; // too dark to trust ratios
+    if (col === "W" || col === "Y") {
+      var u = BRr(rgb) / cast[1];
+      if (u > SPLIT_WY * MARGIN) col = "W";
+      else if (u < SPLIT_WY / MARGIN) col = "Y";
+    }
+    if (col === "R" || col === "O" || col === "Y") {
+      var t = GRr(rgb) / cast[0];
+      if (t > SPLIT_OY * MARGIN) col = "Y";
+      else if (t < SPLIT_OY / MARGIN && t > SPLIT_RO * MARGIN) col = "O";
+      else if (t < SPLIT_RO / MARGIN) col = "R";
+    }
+    return col;
+  }
+  scan.refineFamilies = function (cells, colors, expectedCenter) {
+    var cast = castFactors(cells, colors, expectedCenter);
+    var out = "";
+    for (var i = 0; i < 9; i++) {
+      out += (i === 4) ? expectedCenter : refineFamilyColor(cells[i], cast, colors[i]);
+    }
+    return out;
+  };
+
   scan.classify = function (samples) {
     var labs = {};   // face -> [lab x9] (corrected)
     scan.ORDER.forEach(function (f) {
@@ -2085,6 +2141,27 @@ h1, h2, h3 { line-height: 1.25; }
       });
       assign();
     }
+
+    var castByFace = {};
+    scan.ORDER.forEach(function (f, fi) {
+      var cols = "";
+      for (var ci = 0; ci < 9; ci++) cols += entries[fi * 9 + ci].color;
+      castByFace[f] = castFactors(samples[f], cols, scan.EXPECT[f]);
+    });
+    entries.forEach(function (e) {
+      if (e.cell === 4) return;
+      var nc = refineFamilyColor(samples[e.face][e.cell], castByFace[e.face], e.color);
+      if (nc !== e.color) {
+        e.color = nc;
+        for (var mr = 0; mr < e.ranked.length; mr++) {
+          if (e.ranked[mr].col === nc) {
+            var mv = e.ranked.splice(mr, 1)[0];
+            e.ranked.unshift(mv);
+            break;
+          }
+        }
+      }
+    });
 
     for (var iter = 0; iter < 30; iter++) {
       var counts = {};
@@ -2213,10 +2290,12 @@ h1, h2, h3 { line-height: 1.25; }
     });
     var centroids = scan.canonCentroids();
     var out = "";
+    var corrCells = [];
     for (var j = 0; j < 9; j++) {
       var c = [0, 1, 2].map(function (ch) {
         return Math.max(0, Math.min(255, cells[j][ch] * gain[ch]));
       });
+      corrCells.push(c);
       var lab = srgb2lab(c[0], c[1], c[2]);
       var best = null;
       Object.keys(centroids).forEach(function (col) {
@@ -2229,6 +2308,9 @@ h1, h2, h3 { line-height: 1.25; }
         if (hc) col2 = hc;
       }
       out += col2;
+    }
+    if (out[4] === expected[4]) {
+      out = scan.refineFamilies(corrCells, out, expected[4]);
     }
     return { colors: out, count: scan.matchCount(out, expected) };
   };
@@ -2301,13 +2383,14 @@ h1, h2, h3 { line-height: 1.25; }
     }
 
     var out = "", minConf = 1, maxDist = 0;
-    var detail = [];
     read.forEach(function (r, i) {
-      var col = (i === 4) ? expectedCenter : r.col;
-      out += col;
-      detail.push({ col: col, conf: r.conf, dists: r.dists });
+      out += (i === 4) ? expectedCenter : r.col;
       if (i !== 4 && r.conf < minConf) minConf = r.conf;
       if (r.fullDist > maxDist) maxDist = r.fullDist;
+    });
+    out = scan.refineFamilies(finalCells, out, expectedCenter);
+    var detail = read.map(function (r, i) {
+      return { col: out[i], conf: r.conf, dists: r.dists };
     });
     var centerOk = scan.roughCenterColor(center) === expectedCenter ||
       scan.classifyCells([center], centroids).colors === expectedCenter;
@@ -4287,7 +4370,7 @@ h1, h2, h3 { line-height: 1.25; }
     enter: function (s) {
       var root = s.root;
       var wrap = h("div", { class: "screen" });
-      wrap.appendChild(h("h2", { style: { padding: "12px", textAlign: "center" } }, "DEV: renderer check"));
+      wrap.appendChild(h("h2", { style: { padding: "12px", textAlign: "center" } }, "DEV " + (RA.BUILD || "?") + ": renderer check"));
       var stage = h("div", { class: "lesson-stage", style: { direction: "ltr" } });
       wrap.appendChild(stage);
       var cv = RA.CubeView(stage, { size: 320 });
@@ -4317,6 +4400,46 @@ h1, h2, h3 { line-height: 1.25; }
         }
       }, "Auto-solve"));
       wrap.appendChild(row);
+
+      try {
+        var dbg = JSON.parse(localStorage.getItem("RA.v1.dbgScan") || "null");
+        if (dbg) {
+          wrap.appendChild(h("h3", { style: { padding: "8px 12px" } }, "Last scan (raw camera colors + read)"));
+          var facesRow = h("div", {
+            style: { display: "flex", gap: "10px", flexWrap: "wrap", justifyContent: "center", direction: "ltr" }
+          });
+          ["F", "R", "B", "L", "U", "D"].forEach(function (f) {
+            var d = dbg[f];
+            if (!d || !d.raw || d.raw.length !== 9) return;
+            var box = h("div", { style: { textAlign: "center" } });
+            box.appendChild(h("div", { style: { fontWeight: "bold" } }, f));
+            var grid = h("div", {
+              style: {
+                display: "grid", gridTemplateColumns: "repeat(3, 34px)", gap: "2px",
+                background: "#223", padding: "3px", borderRadius: "6px"
+              }
+            });
+            for (var i = 0; i < 9; i++) {
+              var c = d.raw[i];
+              grid.appendChild(h("div", {
+                style: {
+                  height: "34px", borderRadius: "4px", display: "grid", placeItems: "center",
+                  background: "rgb(" + c[0] + "," + c[1] + "," + c[2] + ")",
+                  color: "#000", fontSize: "13px", fontWeight: "bold",
+                  textShadow: "0 0 3px #fff, 0 0 3px #fff"
+                }
+              }, d.read[i]));
+            }
+            box.appendChild(grid);
+            facesRow.appendChild(box);
+          });
+          wrap.appendChild(facesRow);
+          wrap.appendChild(h("textarea", {
+            readonly: true,
+            style: { width: "94%", margin: "10px 3%", height: "90px", fontSize: "10px", direction: "ltr" }
+          }, JSON.stringify(dbg)));
+        }
+      } catch (e) { /* no dump yet */ }
       root.appendChild(wrap);
     }
   });
@@ -5990,7 +6113,7 @@ h1, h2, h3 { line-height: 1.25; }
           class: "btn btn-gold",
           disabled: true,
           onclick: function () {
-            if (lastPlausible) { RA.sfx("tap"); lockFace(lastPlausible, lastPlausibleDetail); }
+            if (lastPlausible) { RA.sfx("tap"); lockFace(lastPlausible, lastPlausibleDetail, lastPlausibleCells); }
           }
         }, "✓ " + RA.t("scan.capture"));
         controls.appendChild(captureBtn);
@@ -6011,7 +6134,9 @@ h1, h2, h3 { line-height: 1.25; }
       var lastRead = null, agree = 0;
       var lastPlausible = null; // latest centerOk reading (for manual capture)
       var lastPlausibleDetail = null;
+      var lastPlausibleCells = null;
       var startedAt = Date.now();
+      var startedSession = new Date().toISOString(); // keys one scan's debug dump
 
       function currentFace() { return scan.ORDER[faceIdx]; }
       function prompt() {
@@ -6101,6 +6226,7 @@ h1, h2, h3 { line-height: 1.25; }
         if (res.centerOk) {
           lastPlausible = res.colors;
           lastPlausibleDetail = res.detail;
+          lastPlausibleCells = cells;
           captureBtn.disabled = false;
         }
         var promising = res.centerOk && res.conf > 0.05 && res.maxDist < 48;
@@ -6109,7 +6235,7 @@ h1, h2, h3 { line-height: 1.25; }
         if (promising) {
           if (lastRead === res.colors) agree++;
           else { lastRead = res.colors; agree = 1; }
-          if (agree >= 3) lockFace(res.colors, res.detail);
+          if (agree >= 3) lockFace(res.colors, res.detail, cells);
         } else {
           agree = 0;
           if (Date.now() - startedAt > 14000) {
@@ -6119,10 +6245,21 @@ h1, h2, h3 { line-height: 1.25; }
         }
       }
 
-      function lockFace(colors, detail) {
+      function lockFace(colors, detail, rawCells) {
         var f = currentFace();
         faces[f] = colors;
         facesDetail[f] = detail || null;
+        try {
+          var dbg = JSON.parse(localStorage.getItem("RA.v1.dbgScan") || "{}");
+          if (dbg._at !== startedSession) dbg = { _at: startedSession };
+          dbg[f] = {
+            read: colors,
+            raw: (rawCells || []).map(function (c) {
+              return [Math.round(c[0]), Math.round(c[1]), Math.round(c[2])];
+            })
+          };
+          localStorage.setItem("RA.v1.dbgScan", JSON.stringify(dbg));
+        } catch (e) { /* storage full/blocked — debug only */ }
         RA.sfx("good");
         showChips(null);
         cooldownUntil = Date.now() + 900;
