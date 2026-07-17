@@ -490,7 +490,7 @@ h1, h2, h3 { line-height: 1.25; }
 (function () {
   var g = (typeof window !== "undefined") ? window : globalThis;
   var RA = g.RA = g.RA || {};
-  RA.BUILD = "v2.1"; // bump on every deploy — dev screen shows it (cache check)
+  RA.BUILD = "v2.2"; // bump on every deploy — dev screen shows it (cache check)
 
   var handlers = {};
   RA.bus = {
@@ -2290,12 +2290,10 @@ h1, h2, h3 { line-height: 1.25; }
     });
     var centroids = scan.canonCentroids();
     var out = "";
-    var corrCells = [];
     for (var j = 0; j < 9; j++) {
       var c = [0, 1, 2].map(function (ch) {
         return Math.max(0, Math.min(255, cells[j][ch] * gain[ch]));
       });
-      corrCells.push(c);
       var lab = srgb2lab(c[0], c[1], c[2]);
       var best = null;
       Object.keys(centroids).forEach(function (col) {
@@ -2310,7 +2308,7 @@ h1, h2, h3 { line-height: 1.25; }
       out += col2;
     }
     if (out[4] === expected[4]) {
-      out = scan.refineFamilies(corrCells, out, expected[4]);
+      out = scan.refineFamilies(cells, out, expected[4]);
     }
     return { colors: out, count: scan.matchCount(out, expected) };
   };
@@ -2323,6 +2321,11 @@ h1, h2, h3 { line-height: 1.25; }
     var canonLum = (canon[0] + canon[1] + canon[2]) / 3;
     var cLum = (center[0] + center[1] + center[2]) / 3;
     var kExp = Math.max(0.5, Math.min(2.5, canonLum / Math.max(20, cLum)));
+    var maxCh = 1;
+    cells.forEach(function (c) {
+      maxCh = Math.max(maxCh, c[0], c[1], c[2]);
+    });
+    kExp = Math.min(kExp, 252 / maxCh);
     var scaled = cells.map(function (c) {
       return c.map(function (v) { return Math.min(255, v * kExp); });
     });
@@ -2371,9 +2374,14 @@ h1, h2, h3 { line-height: 1.25; }
           ratioN[ch]++;
         }
       });
+      var maxByCh = [1, 1, 1];
+      finalCells.forEach(function (c) {
+        for (var mc = 0; mc < 3; mc++) maxByCh[mc] = Math.max(maxByCh[mc], c[mc]);
+      });
       var gains = [0, 1, 2].map(function (ch) {
         if (!ratioN[ch]) return 1;
-        return Math.max(0.6, Math.min(1.8, ratioSum[ch] / ratioN[ch]));
+        var gv = Math.max(0.6, Math.min(1.8, ratioSum[ch] / ratioN[ch]));
+        return Math.min(gv, 253 / maxByCh[ch]); // clip guard
       });
       if (gains.every(function (gv) { return Math.abs(gv - 1) < 0.02; })) break;
       finalCells = finalCells.map(function (c) {
@@ -2388,7 +2396,7 @@ h1, h2, h3 { line-height: 1.25; }
       if (i !== 4 && r.conf < minConf) minConf = r.conf;
       if (r.fullDist > maxDist) maxDist = r.fullDist;
     });
-    out = scan.refineFamilies(finalCells, out, expectedCenter);
+    out = scan.refineFamilies(cells, out, expectedCenter);
     var detail = read.map(function (r, i) {
       return { col: out[i], conf: r.conf, dists: r.dists };
     });
@@ -6235,7 +6243,10 @@ h1, h2, h3 { line-height: 1.25; }
         if (promising) {
           if (lastRead === res.colors) agree++;
           else { lastRead = res.colors; agree = 1; }
-          if (agree >= 3) lockFace(res.colors, res.detail, cells);
+          var mono = {};
+          for (var mi = 0; mi < 9; mi++) mono[res.colors[mi]] = (mono[res.colors[mi]] || 0) + 1;
+          var maxSame = Math.max.apply(null, Object.keys(mono).map(function (k) { return mono[k]; }));
+          if (agree >= (maxSame >= 7 ? 6 : 3)) lockFace(res.colors, res.detail, cells);
         } else {
           agree = 0;
           if (Date.now() - startedAt > 14000) {
@@ -6262,7 +6273,7 @@ h1, h2, h3 { line-height: 1.25; }
         } catch (e) { /* storage full/blocked — debug only */ }
         RA.sfx("good");
         showChips(null);
-        cooldownUntil = Date.now() + 900;
+        cooldownUntil = Date.now() + 1500; // cover the re-grip so a mid-flip frame can't start agreeing
         fillDot(f, colors);
         var next = -1;
         for (var i = 0; i < scan.ORDER.length; i++) {
