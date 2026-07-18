@@ -490,7 +490,7 @@ h1, h2, h3 { line-height: 1.25; }
 (function () {
   var g = (typeof window !== "undefined") ? window : globalThis;
   var RA = g.RA = g.RA || {};
-  RA.BUILD = "v2.4"; // bump on every deploy — dev screen shows it (cache check)
+  RA.BUILD = "v2.5"; // bump on every deploy — dev screen shows it (cache check)
 
   var handlers = {};
   RA.bus = {
@@ -3058,6 +3058,20 @@ h1, h2, h3 { line-height: 1.25; }
   d["ar.rotate"] = "Turn the WHOLE cube like this";
   d["ar.nocam"] = "No camera here — mirror mode instead";
   d["ar.showAny"] = "Show me your cube just as you're holding it";
+  d["move.row.top"] = "Turn the TOP row";
+  d["move.row.mid"] = "Turn the MIDDLE row";
+  d["move.row.bottom"] = "Turn the BOTTOM row";
+  d["move.col.left"] = "Turn the LEFT column";
+  d["move.col.mid"] = "Turn the MIDDLE column";
+  d["move.col.right"] = "Turn the RIGHT column";
+  d["move.face.front"] = "Spin the FRONT face";
+  d["move.face.back"] = "Spin the BACK (hidden) face";
+  d["move.dir.left"] = "to the left";
+  d["move.dir.right"] = "to the right";
+  d["move.dir.up"] = "upward";
+  d["move.dir.down"] = "downward";
+  d["move.dir.cw"] = "clockwise";
+  d["move.dir.ccw"] = "counter-clockwise";
   d["ar.turnsLeft"] = "{n} to go";
   d["ar.sawIt"] = "Saw it! ✓";
   d["ar.differentMove"] = "Your cube changed differently — continue from how it is now?";
@@ -3417,6 +3431,20 @@ h1, h2, h3 { line-height: 1.25; }
   d["ar.rotate"] = "أدر المكعب كلّه هكذا";
   d["ar.nocam"] = "لا كاميرا هنا — وضع المرآة بدلًا";
   d["ar.showAny"] = "أرني المكعب كما تمسكه الآن";
+  d["move.row.top"] = "لفّ الصف العلوي";
+  d["move.row.mid"] = "لفّ الصف الأوسط";
+  d["move.row.bottom"] = "لفّ الصف السفلي";
+  d["move.col.left"] = "لفّ العمود الأيسر";
+  d["move.col.mid"] = "لفّ العمود الأوسط";
+  d["move.col.right"] = "لفّ العمود الأيمن";
+  d["move.face.front"] = "لفّ الوجه الأمامي";
+  d["move.face.back"] = "لفّ الوجه الخلفي (المخفي)";
+  d["move.dir.left"] = "نحو اليسار";
+  d["move.dir.right"] = "نحو اليمين";
+  d["move.dir.up"] = "لأعلى";
+  d["move.dir.down"] = "لأسفل";
+  d["move.dir.cw"] = "مع عقارب الساعة";
+  d["move.dir.ccw"] = "عكس عقارب الساعة";
   d["ar.turnsLeft"] = "باقي {n}";
   d["ar.sawIt"] = "رأيتها! ✓";
   d["ar.differentMove"] = "مكعبك تغيّر بشكل مختلف — أتابع من وضعك الحالي؟";
@@ -6821,9 +6849,13 @@ h1, h2, h3 { line-height: 1.25; }
           var best = scan.identifyOrientation(cells, ow.target);
           setRing(!!best && best.count >= 8);
           if (!best || best.count < 8) {
-            if (!ow.fellBack && !ow.lastKey && Date.now() - ow.startedAt > 14000) {
+            if (!ow.fellBack && !ow.lastKey && Date.now() - ow.startedAt > 10000) {
               ow.fellBack = true;
               setSay(RA.t("ar.point", { color: RA.t("color." + cube.centerColor(ow.target, "F")) }));
+              buttons([
+                { label: RA.t("ui.skip"), kind: "btn-ghost", fn: function () { ow.finish(); } },
+                { label: "📷 " + RA.t("mission.looksDifferent"), kind: "btn-ghost", fn: rescanCube }
+              ]);
             }
             return;
           }
@@ -6833,14 +6865,16 @@ h1, h2, h3 { line-height: 1.25; }
           if (ow.stable < 2) return;
           if (key === "id") { ow.finish(); return; }
           var grips = scan.invSeq(best.seq);
+          var g0 = grips[0];
+          if (g0.length > 1 && g0.charAt(1) === "2") g0 = g0.charAt(0);
           if (ow.showing !== key) {
             ow.showing = key;
             var msg = RA.t("ar.rotate");
             if (grips.length > 1) msg += " (" + RA.t("ar.turnsLeft", { n: RA.fmtNum(grips.length) }) + ")";
             setSay(msg);
-            drawArrow(arrowG, arrowSpec(grips[0]));
+            drawArrow(arrowG, arrowSpec(g0));
             if (ow.stopLoop) ow.stopLoop();
-            ow.stopLoop = loopMirror(cube.apply(ow.target, best.seq), [grips[0]]);
+            ow.stopLoop = loopMirror(cube.apply(ow.target, best.seq), [g0]);
           }
           return;
         }
@@ -6977,10 +7011,15 @@ h1, h2, h3 { line-height: 1.25; }
             mirror.highlight(step.highlights || []);
             await waitButtons([{ label: RA.t("ui.showMe"), fn: null }]);
             mirror.highlight([]);
+            var seqMoves = [];
+            step.moves.forEach(function (m0) {
+              if (m0.length > 1 && m0.charAt(1) === "2") seqMoves.push(m0[0], m0[0]);
+              else seqMoves.push(m0);
+            });
             var undid = false;
-            for (var i = 0; i < step.moves.length && !stopped; i++) {
-              var mv = step.moves[i];
-              setSay(RA.t(isGrip(mv) ? "ar.rotate" : "ar.doMove") + "  (" + RA.fmtNum(i + 1) + "/" + RA.fmtNum(step.moves.length) + ")");
+            for (var i = 0; i < seqMoves.length && !stopped; i++) {
+              var mv = seqMoves[i];
+              setSay(moveText(mv) + "  (" + RA.fmtNum(i + 1) + "/" + RA.fmtNum(seqMoves.length) + ")");
               drawArrow(arrowG, arrowSpec(mv));
               var after = cube.apply(state, mv);
               var stopLoop = loopMirror(state, [mv]);
@@ -7029,6 +7068,30 @@ h1, h2, h3 { line-height: 1.25; }
       function isGrip(mv) { return "xyz".indexOf(mv[0]) >= 0; }
       var undoStack = []; // states before each confirmed move (for take-backs)
 
+      function moveText(mv) {
+        if (isGrip(mv)) return RA.t("ar.rotate");
+        var L = mv[0], pr = mv.indexOf("'") >= 0;
+        var part = null, dir = null;
+        if (L === "U") { part = "move.row.top"; dir = pr ? "right" : "left"; }
+        else if (L === "D") { part = "move.row.bottom"; dir = pr ? "left" : "right"; }
+        else if (L === "E") { part = "move.row.mid"; dir = pr ? "left" : "right"; }
+        else if (L === "R") { part = "move.col.right"; dir = pr ? "down" : "up"; }
+        else if (L === "L") { part = "move.col.left"; dir = pr ? "up" : "down"; }
+        else if (L === "M") { part = "move.col.mid"; dir = pr ? "up" : "down"; }
+        else if (L === "F") { part = "move.face.front"; dir = pr ? "ccw" : "cw"; }
+        else if (L === "B") { part = "move.face.back"; dir = pr ? "cw" : "ccw"; }
+        if (!part) return RA.t("ar.doMove");
+        return RA.t(part) + " " + RA.t("move.dir." + dir);
+      }
+
+      function rescanCube() {
+        cleanup();
+        RA.startScan({
+          onDone: function (f) { RA.go("arGuide", { facelets: f, gate: gate }); },
+          onCancel: function () { RA.go("arGuide", { facelets: state, gate: gate }); }
+        });
+      }
+
       function manualOrDetect(expectedState, prevState) {
         return new Promise(function (resolve) {
           var done = false;
@@ -7046,6 +7109,7 @@ h1, h2, h3 { line-height: 1.25; }
             if (undoStack.length) {
               defs.push({ label: "↩ " + RA.t("ui.undo"), kind: "btn-ghost", fn: function () { finish("undo"); } });
             }
+            defs.push({ label: "📷 " + RA.t("mission.looksDifferent"), kind: "btn-ghost", fn: rescanCube });
             defs.push({ label: "✕", kind: "btn-ghost", fn: function () { cleanup(); RA.go("map"); } });
             buttons(defs);
           }
