@@ -490,7 +490,7 @@ h1, h2, h3 { line-height: 1.25; }
 (function () {
   var g = (typeof window !== "undefined") ? window : globalThis;
   var RA = g.RA = g.RA || {};
-  RA.BUILD = "v2.2"; // bump on every deploy — dev screen shows it (cache check)
+  RA.BUILD = "v2.3"; // bump on every deploy — dev screen shows it (cache check)
 
   var handlers = {};
   RA.bus = {
@@ -2890,6 +2890,7 @@ h1, h2, h3 { line-height: 1.25; }
   d["ui.great"] = "Great!";
   d["ui.tryagain"] = "Try again";
   d["ui.iDidIt"] = "I did it ✓";
+  d["ui.undo"] = "Undo";
   d["ui.showMe"] = "Show me";
   d["ui.close"] = "Close";
   d["ui.badges"] = "Badges";
@@ -3006,6 +3007,8 @@ h1, h2, h3 { line-height: 1.25; }
   d["paint.tooMany"] = "{color}: {n} — more than 9!";
   d["paint.rebalanced"] = "I rearranged the rest to keep it possible ✨";
   d["scan.reviewAll"] = "All done! Tap any face to redo it, or continue";
+  d["scan.resumed"] = "Resumed where you stopped! Tap any face to redo it";
+  d["scan.restart"] = "Start over";
   d["paint.badPiece"] = "That piece can't exist — check the glowing squares";
   d["paint.swapped"] = "Colors count fine, but two pieces look swapped";
 
@@ -3240,6 +3243,7 @@ h1, h2, h3 { line-height: 1.25; }
   d["ui.great"] = "رائع!";
   d["ui.tryagain"] = "حاول مجددًا";
   d["ui.iDidIt"] = "فعلتها ✓";
+  d["ui.undo"] = "تراجع";
   d["ui.showMe"] = "أرني";
   d["ui.close"] = "إغلاق";
   d["ui.badges"] = "الأوسمة";
@@ -3356,6 +3360,8 @@ h1, h2, h3 { line-height: 1.25; }
   d["paint.tooMany"] = "{color}: {n} — أكثر من ٩!";
   d["paint.rebalanced"] = "رتّبت الباقي ليبقى ممكنًا ✨";
   d["scan.reviewAll"] = "اكتمل! المس أي وجه لإعادته، أو تابع";
+  d["scan.resumed"] = "تابعنا من حيث توقفت! المس أي وجه لإعادته";
+  d["scan.restart"] = "من جديد";
   d["paint.badPiece"] = "هذه القطعة لا يمكن أن توجد — انظر للمربعات المضيئة";
   d["paint.swapped"] = "العدد صحيح لكن قطعتين متبادلتان";
 
@@ -4378,7 +4384,7 @@ h1, h2, h3 { line-height: 1.25; }
     enter: function (s) {
       var root = s.root;
       var wrap = h("div", { class: "screen" });
-      wrap.appendChild(h("h2", { style: { padding: "12px", textAlign: "center" } }, "DEV " + (RA.BUILD || "?") + ": renderer check"));
+      wrap.appendChild(ui.topbar({ title: "DEV " + (RA.BUILD || "?"), back: function () { RA.go("home"); }, stats: false }));
       var stage = h("div", { class: "lesson-stage", style: { direction: "ltr" } });
       wrap.appendChild(stage);
       var cv = RA.CubeView(stage, { size: 320 });
@@ -5337,6 +5343,28 @@ h1, h2, h3 { line-height: 1.25; }
     var samples = {}, photos = {};
     var faceIdx = 0;
 
+    var PHOTO_DRAFT = "RA.v1.scanDraftPhoto";
+    function savePhotoDraft() {
+      try {
+        localStorage.setItem(PHOTO_DRAFT, JSON.stringify({ at: Date.now(), samples: samples }));
+      } catch (e) {}
+    }
+    (function restorePhotoDraft() {
+      var d = null;
+      try { d = JSON.parse(localStorage.getItem(PHOTO_DRAFT) || "null"); } catch (e) {}
+      if (!d || !d.samples || Date.now() - (d.at || 0) > 6 * 3600 * 1000) return;
+      var got = 0;
+      scan.ORDER.forEach(function (f) {
+        if (d.samples[f] && d.samples[f].length === 9) { samples[f] = d.samples[f]; got++; }
+      });
+      if (!got) return;
+      for (var i = 0; i < scan.ORDER.length; i++) {
+        if (!samples[scan.ORDER[i]]) { faceIdx = i; break; }
+        faceIdx = i + 1;
+      }
+      setTimeout(function () { ui.toast(RA.t("scan.resumed"), 3200); }, 400);
+    })();
+
     function currentFace() { return scan.ORDER[faceIdx]; }
 
     function renderStep() {
@@ -5357,6 +5385,11 @@ h1, h2, h3 { line-height: 1.25; }
         if (photos[f]) {
           var img = h("img", { src: photos[f] });
           thumbs.appendChild(img);
+        } else if (samples[f]) {
+          thumbs.appendChild(h("div", {
+            class: "ph",
+            style: { display: "grid", placeItems: "center", fontWeight: "bold", color: "var(--teal-deep)" }
+          }, "✓"));
         } else {
           thumbs.appendChild(h("div", { class: "ph", style: i === faceIdx ? { outline: "3px solid var(--gold-bright)" } : null }));
         }
@@ -5388,6 +5421,7 @@ h1, h2, h3 { line-height: 1.25; }
           }
           samples[face] = cells;
           photos[face] = dec.canvas.toDataURL("image/jpeg", 0.5);
+          savePhotoDraft();
           RA.sfx("good");
           faceIdx++;
           if (faceIdx >= scan.ORDER.length) fixStep();
@@ -5501,13 +5535,19 @@ h1, h2, h3 { line-height: 1.25; }
       wrap.appendChild(h("div", { style: { display: "flex", justifyContent: "center", marginTop: "8px" } },
         h("button", {
           class: "btn btn-ghost",
-          onclick: function () { RA.sfx("tap"); faceIdx = 0; samples = {}; photos = {}; renderStep(); }
+          onclick: function () {
+            RA.sfx("tap");
+            try { localStorage.removeItem(PHOTO_DRAFT); } catch (e) {}
+            faceIdx = 0; samples = {}; photos = {};
+            renderStep();
+          }
         }, "📷 " + RA.t("scan.retake"))));
       root.appendChild(wrap);
       refresh();
     }
 
-    renderStep();
+    if (faceIdx >= scan.ORDER.length) fixStep();
+    else renderStep();
   }
 
   async function decodeFull(file, maxDim) {
@@ -5784,6 +5824,10 @@ h1, h2, h3 { line-height: 1.25; }
       class: "btn btn-gold btn-big",
       onclick: function () {
         RA.sfx("good");
+        try {
+          localStorage.removeItem("RA.v1.scanDraft");
+          localStorage.removeItem("RA.v1.scanDraftPhoto");
+        } catch (e) {}
         if (fixed && p) { RA.game.checkBadges(p, { type: "fix" }); RA.saveProfile(p); }
         onDone(net.state());
       }
@@ -5882,6 +5926,7 @@ h1, h2, h3 { line-height: 1.25; }
               return;
             }
             var guard = 0;
+            var undoStack = []; // states before each confirmed step (take-backs)
             while (solver.detectStage(state) < lesson.gate && guard++ < 80) {
               var step = solver.nextStep(state);
               if (!step || step.done) break;
@@ -5900,12 +5945,21 @@ h1, h2, h3 { line-height: 1.25; }
               ctx.cv.arrow(null);
               ctx.say("mission.follow");
               var redo = await new Promise(function (resolve) {
-                ctx.buttons([
+                var defs = [
                   { label: RA.t("mission.didIt"), fn: function () { resolve(false); } },
                   { label: "🔁 " + RA.t("ui.again"), kind: "btn-ghost", fn: function () { resolve(true); } },
                   { label: RA.t("mission.looksDifferent"), kind: "btn-ghost", fn: function () { resolve("rescan"); } }
-                ]);
+                ];
+                if (undoStack.length) {
+                  defs.splice(1, 0, { label: "↩ " + RA.t("ui.undo"), kind: "btn-ghost", fn: function () { resolve("undo"); } });
+                }
+                ctx.buttons(defs);
               });
+              if (redo === "undo") {
+                state = undoStack.pop();
+                ctx.cv.setState(state);
+                continue; // re-teach from the restored state
+              }
               if (redo === true) {
                 ctx.cv.setState(state);
                 ctx.say("case." + step.caseId + ".do");
@@ -5930,6 +5984,7 @@ h1, h2, h3 { line-height: 1.25; }
                 });
                 return;
               }
+              undoStack.push(state);
               state = cube.apply(state, step.moves);
               var p = RA.profiles.active();
               recStats.total++; recStats.correct++; recStats.firstTry++;
@@ -6096,6 +6151,7 @@ h1, h2, h3 { line-height: 1.25; }
       function redoFace(fi2) {
         faces[scan.ORDER[fi2]] = null;
         facesDetail[scan.ORDER[fi2]] = null;
+        saveDraft();
         RA.clear(dotEls[scan.ORDER[fi2]]);
         faceIdx = fi2;
         stopped = false;
@@ -6133,12 +6189,54 @@ h1, h2, h3 { line-height: 1.25; }
           class: "btn btn-ghost",
           onclick: function () { RA.sfx("tap"); cleanup(); RA.go("scan", Object.assign({}, s.params, { paint: true })); }
         }, "🎨 " + RA.t("scan.manual")));
+        controls.appendChild(h("button", {
+          class: "btn btn-ghost",
+          onclick: function () {
+            RA.sfx("tap");
+            clearDraft();
+            scan.ORDER.forEach(function (f) {
+              faces[f] = null;
+              facesDetail[f] = null;
+              RA.clear(dotEls[f]);
+            });
+            faceIdx = 0;
+            reviewing = false;
+            buildControls();
+            prompt();
+          }
+        }, "🔄 " + RA.t("scan.restart")));
       }
       buildControls();
 
       var faces = {};
       var facesDetail = {}; // per-face per-cell distances (for count repair)
       var faceIdx = 0;
+      var DRAFT_KEY = "RA.v1.scanDraft";
+      function saveDraft() {
+        try {
+          localStorage.setItem(DRAFT_KEY, JSON.stringify({
+            at: Date.now(), faces: faces, detail: facesDetail
+          }));
+        } catch (e) { /* storage full — resume is best-effort */ }
+      }
+      function clearDraft() {
+        try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
+      }
+      function restoreDraft() {
+        var d = null;
+        try { d = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null"); } catch (e) {}
+        if (!d || !d.faces || Date.now() - (d.at || 0) > 6 * 3600 * 1000) return false;
+        var got = 0;
+        scan.ORDER.forEach(function (f) {
+          if (d.faces[f] && d.faces[f].length === 9) {
+            faces[f] = d.faces[f];
+            facesDetail[f] = (d.detail && d.detail[f]) || null;
+            fillDot(f, faces[f]);
+            got++;
+          }
+        });
+        return got > 0;
+      }
       var lastRead = null, agree = 0;
       var lastPlausible = null; // latest centerOk reading (for manual capture)
       var lastPlausibleDetail = null;
@@ -6275,6 +6373,7 @@ h1, h2, h3 { line-height: 1.25; }
         showChips(null);
         cooldownUntil = Date.now() + 1500; // cover the re-grip so a mid-flip frame can't start agreeing
         fillDot(f, colors);
+        saveDraft();
         var next = -1;
         for (var i = 0; i < scan.ORDER.length; i++) {
           if (!faces[scan.ORDER[i]]) { next = i; break; }
@@ -6319,6 +6418,7 @@ h1, h2, h3 { line-height: 1.25; }
           RA.saveProfile(p2);
         }
         RA.scanReview(root, facelets, [], function (finalState) {
+          clearDraft();
           var p3 = RA.profiles.active();
           if (p3) {
             p3.cube = { facelets: finalState, scannedAt: RA.now() };
@@ -6362,8 +6462,20 @@ h1, h2, h3 { line-height: 1.25; }
 
       (async function () {
         try {
+          var resumed = restoreDraft();
           await openStreamLS();
-          prompt();
+          var allDone = scan.ORDER.every(function (f) { return !!faces[f]; });
+          if (allDone) {
+            allCaptured();
+          } else {
+            if (resumed) {
+              for (var ri = 0; ri < scan.ORDER.length; ri++) {
+                if (!faces[scan.ORDER[ri]]) { faceIdx = ri; break; }
+              }
+              ui.toast(RA.t("scan.resumed"), 3200);
+            }
+            prompt();
+          }
           timer = setInterval(tick, 220);
         } catch (e) {
           ui.toast(RA.t("ar.nocam"), 2600);
@@ -6766,17 +6878,26 @@ h1, h2, h3 { line-height: 1.25; }
             mirror.highlight(step.highlights || []);
             await waitButtons([{ label: RA.t("ui.showMe"), fn: null }]);
             mirror.highlight([]);
+            var undid = false;
             for (var i = 0; i < step.moves.length && !stopped; i++) {
               var mv = step.moves[i];
               setSay(RA.t(isGrip(mv) ? "ar.rotate" : "ar.doMove") + "  (" + RA.fmtNum(i + 1) + "/" + RA.fmtNum(step.moves.length) + ")");
               drawArrow(arrowG, arrowSpec(mv));
               var after = cube.apply(state, mv);
               var stopLoop = loopMirror(state, [mv]);
-              await manualOrDetect(after, state);
+              var act = await manualOrDetect(after, state);
+              if (act === "undo") {
+                if (undoStack.length) state = undoStack.pop();
+                stopLoop(state);
+                undid = true;
+                break;
+              }
               stopLoop(after);
+              undoStack.push(state);
               state = after;
             }
             RA.clear(arrowG);
+            if (undid) continue;
             ui.awardXp(2, null);
           }
           if (stopped) return;
@@ -6800,23 +6921,26 @@ h1, h2, h3 { line-height: 1.25; }
       })();
 
       function isGrip(mv) { return "xyz".indexOf(mv[0]) >= 0; }
+      var undoStack = []; // states before each confirmed move (for take-backs)
 
       function manualOrDetect(expectedState, prevState) {
         return new Promise(function (resolve) {
           var done = false;
-          function finish() {
+          function finish(action) {
             if (done) return;
             done = true;
             watcher = null;
             RA.clear(controls);
-            resolve();
+            resolve(action || "did");
           }
           var frontChanged = !prevState || frontFaceOf(expectedState) !== frontFaceOf(prevState);
           if (hasCamera && frontChanged) watchFor(frontFaceOf(expectedState), 2, finish);
-          buttons([
-            { label: RA.t("mission.didIt"), fn: finish },
-            { label: "✕", kind: "btn-ghost", fn: function () { cleanup(); RA.go("map"); } }
-          ]);
+          var defs = [{ label: RA.t("mission.didIt"), fn: function () { finish("did"); } }];
+          if (undoStack.length) {
+            defs.push({ label: "↩ " + RA.t("ui.undo"), kind: "btn-ghost", fn: function () { finish("undo"); } });
+          }
+          defs.push({ label: "✕", kind: "btn-ghost", fn: function () { cleanup(); RA.go("map"); } });
+          buttons(defs);
         });
       }
       function alignPhase(st) {
