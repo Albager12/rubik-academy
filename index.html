@@ -490,7 +490,7 @@ h1, h2, h3 { line-height: 1.25; }
 (function () {
   var g = (typeof window !== "undefined") ? window : globalThis;
   var RA = g.RA = g.RA || {};
-  RA.BUILD = "v2.3"; // bump on every deploy — dev screen shows it (cache check)
+  RA.BUILD = "v2.4"; // bump on every deploy — dev screen shows it (cache check)
 
   var handlers = {};
   RA.bus = {
@@ -2616,6 +2616,40 @@ h1, h2, h3 { line-height: 1.25; }
 
   scan.FACE_OF_COLOR = { W: "U", Y: "D", G: "F", B: "B", R: "R", O: "L" };
 
+  scan.ORIENT_SEQS = (function () {
+    var ups = [[], ["x"], ["x2"], ["x'"], ["z"], ["z'"]];
+    var ys = [[], ["y"], ["y2"], ["y'"]];
+    var out = [];
+    ups.forEach(function (u) {
+      ys.forEach(function (yy) { out.push(u.concat(yy)); });
+    });
+    return out;
+  })();
+  scan.invMove = function (m) {
+    if (m.length === 1) return m + "'";
+    if (m.charAt(1) === "'") return m.charAt(0);
+    return m; // double turns are their own inverse
+  };
+  scan.invSeq = function (seq) {
+    return seq.slice().reverse().map(scan.invMove);
+  };
+  scan.identifyOrientation = function (cells, state) {
+    var cube2 = (g.RA && g.RA.cube) || null;
+    if (!cube2) return null;
+    var best = null;
+    for (var i = 0; i < scan.ORIENT_SEQS.length; i++) {
+      var seq = scan.ORIENT_SEQS[i];
+      var st2 = seq.length ? cube2.apply(state, seq) : state;
+      var front = st2.substr(2 * 9, 9); // F block in URFDLB order
+      var res = scan.matchExpected(cells, front);
+      if (!best || res.count > best.count ||
+          (res.count === best.count && seq.length < best.seq.length)) {
+        best = { seq: seq, count: res.count };
+      }
+    }
+    return best;
+  };
+
   scan.mirrorFace = function (colors) {
     var out = "";
     for (var i = 0; i < 9; i++) {
@@ -3023,6 +3057,12 @@ h1, h2, h3 { line-height: 1.25; }
   d["ar.doMove"] = "Follow the arrow on YOUR cube";
   d["ar.rotate"] = "Turn the WHOLE cube like this";
   d["ar.nocam"] = "No camera here — mirror mode instead";
+  d["ar.showAny"] = "Show me your cube just as you're holding it";
+  d["ar.turnsLeft"] = "{n} to go";
+  d["ar.sawIt"] = "Saw it! ✓";
+  d["ar.differentMove"] = "Your cube changed differently — continue from how it is now?";
+  d["ar.continueHere"] = "Continue from here";
+  d["ar.illFix"] = "I'll fix it";
   d["color.W"] = "white"; d["color.Y"] = "yellow"; d["color.G"] = "green";
   d["color.B"] = "blue"; d["color.R"] = "red"; d["color.O"] = "orange";
 
@@ -3376,6 +3416,12 @@ h1, h2, h3 { line-height: 1.25; }
   d["ar.doMove"] = "اتبع السهم على مكعبك أنت";
   d["ar.rotate"] = "أدر المكعب كلّه هكذا";
   d["ar.nocam"] = "لا كاميرا هنا — وضع المرآة بدلًا";
+  d["ar.showAny"] = "أرني المكعب كما تمسكه الآن";
+  d["ar.turnsLeft"] = "باقي {n}";
+  d["ar.sawIt"] = "رأيتها! ✓";
+  d["ar.differentMove"] = "مكعبك تغيّر بشكل مختلف — أتابع من وضعك الحالي؟";
+  d["ar.continueHere"] = "تابع من وضعي";
+  d["ar.illFix"] = "سأصلحها";
   d["color.W"] = "أبيض"; d["color.Y"] = "أصفر"; d["color.G"] = "أخضر";
   d["color.B"] = "أزرق"; d["color.R"] = "أحمر"; d["color.O"] = "برتقالي";
 
@@ -6635,7 +6681,7 @@ h1, h2, h3 { line-height: 1.25; }
       var overlay = hs("svg", { viewBox: "0 0 100 100", class: "ar-overlay", preserveAspectRatio: "xMidYMid meet" });
       var frameG = hs("g", null);
       overlay.appendChild(frameG);
-      var arrowG = hs("g", null);
+      var arrowG = hs("g", { opacity: 0 }); // arrows show only while the cube is actually tracked
       overlay.appendChild(arrowG);
       var statusRing = hs("rect", { x: 15, y: 15, width: 70, height: 70, rx: 6, fill: "none", stroke: "rgba(255,255,255,0.9)", "stroke-width": 1.6 });
       frameG.appendChild(statusRing);
@@ -6740,6 +6786,7 @@ h1, h2, h3 { line-height: 1.25; }
           ? { anchor: [tapAnchor.x, tapAnchor.y] } : undefined;
         var region = scan.findCubeRegion(grid, 96, 96, opts);
         if (!region) return null;
+        lastTracked = Date.now();
         var k = 300 / 96;
         var rx = region.x * k, ry = region.y * k, rs = region.side * k;
         var cells = [];
@@ -6757,28 +6804,80 @@ h1, h2, h3 { line-height: 1.25; }
         return cells;
       }
 
-      var watcher = null;
-      function watchFor(expected, need, cb) {
-        watcher = { expected: expected, need: need || 2, seen: 0, cb: cb };
-      }
+      var lastTracked = 0;
+      var orientWait = null; // orientation phase: identify the hold, guide grips
+      var moveWait = null;   // move phase: auto-confirm / catch a wrong move
+      var FACE_MOVES = ["U", "U'", "U2", "D", "D'", "D2", "L", "L'", "L2",
+                        "R", "R'", "R2", "F", "F'", "F2", "B", "B'", "B2"];
+
       function tick() {
-        if (stopped || !hasCamera || !watcher) return;
+        if (stopped || !hasCamera) return;
         var cells = sampleFrame();
-        if (!cells) return;
-        var res = scan.matchExpected(cells, watcher.expected);
-        var ok = res.count >= 8;
-        setRing(ok);
-        if (ok) {
-          watcher.seen++;
-          if (watcher.seen >= watcher.need) {
-            var cb = watcher.cb;
-            watcher = null;
-            setRing(false);
-            RA.sfx("good");
-            cb();
+        arrowG.setAttribute("opacity", Date.now() - lastTracked < 1200 ? 1 : 0);
+        if (!cells) { setRing(false); return; }
+
+        if (orientWait) {
+          var ow = orientWait;
+          var best = scan.identifyOrientation(cells, ow.target);
+          setRing(!!best && best.count >= 8);
+          if (!best || best.count < 8) {
+            if (!ow.fellBack && !ow.lastKey && Date.now() - ow.startedAt > 14000) {
+              ow.fellBack = true;
+              setSay(RA.t("ar.point", { color: RA.t("color." + cube.centerColor(ow.target, "F")) }));
+            }
+            return;
           }
-        } else {
-          watcher.seen = 0;
+          var key = best.seq.join(" ") || "id";
+          ow.stable = ow.lastKey === key ? ow.stable + 1 : 1;
+          ow.lastKey = key;
+          if (ow.stable < 2) return;
+          if (key === "id") { ow.finish(); return; }
+          var grips = scan.invSeq(best.seq);
+          if (ow.showing !== key) {
+            ow.showing = key;
+            var msg = RA.t("ar.rotate");
+            if (grips.length > 1) msg += " (" + RA.t("ar.turnsLeft", { n: RA.fmtNum(grips.length) }) + ")";
+            setSay(msg);
+            drawArrow(arrowG, arrowSpec(grips[0]));
+            if (ow.stopLoop) ow.stopLoop();
+            ow.stopLoop = loopMirror(cube.apply(ow.target, best.seq), [grips[0]]);
+          }
+          return;
+        }
+
+        if (moveWait) {
+          var mw = moveWait;
+          var rExp = scan.matchExpected(cells, frontFaceOf(mw.expected));
+          setRing(rExp.count >= 8);
+          if (rExp.count >= 8) {
+            mw.seen++;
+            if (mw.seen >= 2) mw.onDid();
+            return;
+          }
+          mw.seen = 0;
+          if (!mw.prev) return;
+          if (scan.matchExpected(cells, frontFaceOf(mw.prev)).count >= 8) {
+            mw.wrong = 0; mw.wrongKey = null; // hasn't moved yet
+            return;
+          }
+          var found = null;
+          var fPrev = frontFaceOf(mw.prev), fExp = frontFaceOf(mw.expected);
+          for (var fi = 0; fi < FACE_MOVES.length && !found; fi++) {
+            var st2 = cube.apply(mw.prev, FACE_MOVES[fi]);
+            var f2 = frontFaceOf(st2);
+            if (f2 === fPrev || f2 === fExp) continue;
+            if (scan.matchExpected(cells, f2).count >= 8) {
+              found = { m: FACE_MOVES[fi], st: st2 };
+            }
+          }
+          if (found) {
+            mw.wrong = mw.wrongKey === found.m ? mw.wrong + 1 : 1;
+            mw.wrongKey = found.m;
+            if (mw.wrong >= 3) mw.onWrong(found.st);
+          } else {
+            mw.wrong = 0; mw.wrongKey = null;
+          }
+          return;
         }
       }
 
@@ -6855,25 +6954,25 @@ h1, h2, h3 { line-height: 1.25; }
         try {
           var rot = solver.orientYellowUp(state);
           if (rot.length) {
-            setSay(RA.t("mission.flipYellow"));
-            drawArrow(arrowG, arrowSpec(rot[0]));
             var afterRot = cube.apply(state, rot);
-            var stopRotLoop = loopMirror(state, rot);
-            await manualOrDetect(afterRot);
-            stopRotLoop(afterRot);
-            state = afterRot;
+            if (hasCamera) {
+              state = afterRot; // ensureOriented below guides the hold
+            } else {
+              setSay(RA.t("mission.flipYellow"));
+              drawArrow(arrowG, arrowSpec(rot[0]));
+              var stopRotLoop = loopMirror(state, rot);
+              await manualOrDetect(afterRot);
+              stopRotLoop(afterRot);
+              state = afterRot;
+            }
           }
           var guard = 0;
           while (!stopped && solver.detectStage(state) < gate && guard++ < 90) {
             progress.firstChild.style.width = Math.round(RA.clamp(solver.detectStage(state) / gate, 0, 1) * 100) + "%";
             var step = solver.nextStep(state);
             if (!step || step.done) break;
-            var frontColor = cube.centerColor(state, "F");
             RA.clear(arrowG);
-            if (hasCamera) {
-              setSay(RA.t("ar.point", { color: RA.t("color." + frontColor) }));
-              await alignPhase(state);
-            }
+            if (hasCamera) await ensureOriented(state);
             setSay(RA.t("case." + step.caseId + ".spot"));
             mirror.highlight(step.highlights || []);
             await waitButtons([{ label: RA.t("ui.showMe"), fn: null }]);
@@ -6888,6 +6987,13 @@ h1, h2, h3 { line-height: 1.25; }
               var act = await manualOrDetect(after, state);
               if (act === "undo") {
                 if (undoStack.length) state = undoStack.pop();
+                stopLoop(state);
+                undid = true;
+                break;
+              }
+              if (act && act.adapted) {
+                undoStack.push(state);
+                state = act.adapted;
                 stopLoop(state);
                 undid = true;
                 break;
@@ -6926,38 +7032,84 @@ h1, h2, h3 { line-height: 1.25; }
       function manualOrDetect(expectedState, prevState) {
         return new Promise(function (resolve) {
           var done = false;
+          var sayBefore = say.textContent;
           function finish(action) {
             if (done) return;
             done = true;
-            watcher = null;
+            moveWait = null;
             RA.clear(controls);
+            setRing(false);
             resolve(action || "did");
           }
-          var frontChanged = !prevState || frontFaceOf(expectedState) !== frontFaceOf(prevState);
-          if (hasCamera && frontChanged) watchFor(frontFaceOf(expectedState), 2, finish);
-          var defs = [{ label: RA.t("mission.didIt"), fn: function () { finish("did"); } }];
-          if (undoStack.length) {
-            defs.push({ label: "↩ " + RA.t("ui.undo"), kind: "btn-ghost", fn: function () { finish("undo"); } });
+          function baseButtons() {
+            var defs = [{ label: RA.t("mission.didIt"), fn: function () { finish("did"); } }];
+            if (undoStack.length) {
+              defs.push({ label: "↩ " + RA.t("ui.undo"), kind: "btn-ghost", fn: function () { finish("undo"); } });
+            }
+            defs.push({ label: "✕", kind: "btn-ghost", fn: function () { cleanup(); RA.go("map"); } });
+            buttons(defs);
           }
-          defs.push({ label: "✕", kind: "btn-ghost", fn: function () { cleanup(); RA.go("map"); } });
-          buttons(defs);
+          function arm() {
+            moveWait = {
+              expected: expectedState, prev: prevState || null,
+              seen: 0, wrong: 0, wrongKey: null,
+              onDid: function () {
+                ui.toast(RA.t("ar.sawIt"), 1300);
+                RA.sfx("good");
+                finish("did");
+              },
+              onWrong: function (actualState) {
+                moveWait = null;
+                setRing(false);
+                setSay(RA.t("ar.differentMove"));
+                RA.sfx("tap");
+                var defs = [
+                  { label: RA.t("ar.continueHere"), fn: function () { finish({ adapted: actualState }); } },
+                  { label: RA.t("ar.illFix"), kind: "btn-ghost", fn: function () {
+                      say.textContent = sayBefore;
+                      baseButtons();
+                      arm();
+                    } }
+                ];
+                if (undoStack.length) {
+                  defs.push({ label: "↩ " + RA.t("ui.undo"), kind: "btn-ghost", fn: function () { finish("undo"); } });
+                }
+                defs.push({ label: "✕", kind: "btn-ghost", fn: function () { cleanup(); RA.go("map"); } });
+                buttons(defs);
+              }
+            };
+          }
+          var frontChanged = !prevState || frontFaceOf(expectedState) !== frontFaceOf(prevState);
+          if (hasCamera && frontChanged) arm();
+          baseButtons();
         });
       }
-      function alignPhase(st) {
+      function ensureOriented(targetSt) {
+        if (!hasCamera || stopped) return Promise.resolve();
         return new Promise(function (resolve) {
-          var done = false;
-          function finish() {
-            if (done) return;
-            done = true;
-            watcher = null;
+          var ow = {
+            target: targetSt,
+            lastKey: null, stable: 0, showing: null, stopLoop: null,
+            startedAt: Date.now(), fellBack: false
+          };
+          ow.finish = function () {
+            if (orientWait !== ow) return;
+            orientWait = null;
+            if (ow.stopLoop) ow.stopLoop();
+            mirror.setState(targetSt);
+            RA.clear(arrowG);
             RA.clear(controls);
+            setRing(false);
             setSay(RA.t("ar.aligned"));
-            setTimeout(resolve, 500);
-          }
-          watchFor(frontFaceOf(st), 2, finish);
+            RA.sfx("good");
+            setTimeout(resolve, 450);
+          };
+          setSay(RA.t("ar.showAny"));
+          mirror.setState(targetSt);
           buttons([
-            { label: RA.t("ui.skip"), kind: "btn-ghost", fn: finish }
+            { label: RA.t("ui.skip"), kind: "btn-ghost", fn: function () { ow.finish(); } }
           ]);
+          orientWait = ow;
         });
       }
       function waitButtons(defs) {
